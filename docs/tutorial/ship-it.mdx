@@ -1,6 +1,6 @@
 ---
 title: "Ship It"
-description: "Part 9 of the Build an Agent tutorial. Put a web dashboard on the agent with useEveAgent, replace placeholderAuth, and deploy to Vercel."
+description: "Part 8 of the Build an Agent tutorial. Put a web dashboard on the agent with useEveAgent, replace placeholderAuth, and deploy to Vercel."
 ---
 
 The analytics assistant runs in the TUI. Now add a web dashboard and deploy a private, single-user version on Vercel. This example protects the sample app with a username and password. It does not require another authentication service.
@@ -125,10 +125,9 @@ The private assistant queries the sample data, runs analysis in a sandbox, chart
 
 ## What you learned
 
-Across the nine steps you built and shipped one agent, and along the way you used:
+Across the eight steps you built and shipped one agent, and along the way you used:
 
 - **Tools** to give the model typed actions (`run_sql`, `chart_series`, `define_metric`).
-- **Connections** to reach a warehouse over an OAuth MCP, with per-user tokens eve resolves for you.
 - **The sandbox** to compute and chart beyond SQL in an isolated `/workspace`.
 - **State** (`defineState`) to remember the team's glossary across turns.
 - **Dynamic skills** (`defineDynamic`) to load the right team playbook per caller.
@@ -138,6 +137,7 @@ Across the nine steps you built and shipped one agent, and along the way you use
 
 ## Next steps
 
+- [Connect a warehouse](./connect-a-warehouse) when you have a data service to use in place of the sample dataset.
 - [MCP connections](../connections/mcp) for tool allowlists and per-connection approval.
 - [Sandbox](../sandbox) for backends, lifecycle, and network policy.
 - [Dynamic capabilities](../guides/dynamic-capabilities) for schema-derived dynamic tools, a read-only analyst subagent, and model-authored report workflows on this same example.

@@ -1,9 +1,9 @@
 ---
-title: "Connect a Warehouse"
-description: "Part 4 of the Build an Agent tutorial. Let each user connect their own warehouse over an OAuth MCP via Vercel Connect."
+title: "Connect a Warehouse (Optional)"
+description: "Optional follow-up to the Build an Agent tutorial. Let each user connect their own warehouse over an OAuth MCP via Vercel Connect."
 ---
 
-The sample dataset got the analytics assistant running, but it's a stand-in. Now point the agent at a real warehouse and let each user connect their own by signing in through their browser. That's what a connection is for. It's an MCP server the model reaches through tools, with auth that eve drives for you.
+Complete [the tutorial with sample data](./first-agent) first. When you have a warehouse with an MCP server, you can connect it to the analytics assistant and let each user sign in through their browser. That's what a connection is for. It's an MCP server the model reaches through tools, with auth that eve drives for you.
 
 [Vercel Connect is generally available](https://vercel.com/changelog/vercel-connect-secure-access-to-external-services-for-your-agents). You can complete the tutorial with the [sample dataset](./query-sample-data); Connect is only needed for the OAuth integration shown on this page.
 
@@ -76,6 +76,6 @@ Right before each request to the MCP server, eve resolves the bearer and sends i
 
 Gate the connection behind approval (`approval: once()`) or narrow which tools the model sees (`tools.allow`) when needed. See [MCP connections](../connections/mcp).
 
-→ Next: [Run analysis](./run-analysis)
+→ Return to the tutorial: [Run analysis](./run-analysis)
 
 Learn more: [MCP connections](../connections/mcp) · [Authentication](../guides/auth-and-route-protection)
