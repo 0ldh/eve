@@ -199,6 +199,8 @@ export function validateDurableDynamicToolCallbacks(
     );
   }
 
+  const hasLabelComplete = entry.label?.complete !== undefined;
+  const hasLabelDelta = entry.label?.delta !== undefined;
   const hasLabelStart = entry.label?.start !== undefined;
   const hasApproval = entry.approval !== undefined;
   const hasApprovalResponse =
@@ -212,6 +214,20 @@ export function validateDurableDynamicToolCallbacks(
     stamped: raw.execute,
     required: true,
   })!;
+  const labelComplete = validateReference({
+    name,
+    owner,
+    phase: "labelComplete",
+    stamped: raw.label?.complete,
+    required: hasLabelComplete,
+  });
+  const labelDelta = validateReference({
+    name,
+    owner,
+    phase: "labelDelta",
+    stamped: raw.label?.delta,
+    required: hasLabelDelta,
+  });
   const labelStart = validateReference({
     name,
     owner,
@@ -250,13 +266,23 @@ export function validateDurableDynamicToolCallbacks(
 
   const callbacks: {
     execute: DurableDynamicCallbackReference;
-    label?: { start?: DurableDynamicCallbackReference };
+    label?: {
+      complete?: DurableDynamicCallbackReference;
+      delta?: DurableDynamicCallbackReference;
+      start?: DurableDynamicCallbackReference;
+    };
     approvalKey?: DurableDynamicCallbackReference;
     approvalRequest?: DurableDynamicCallbackReference;
     approvalResponse?: DurableDynamicCallbackReference;
     toModelOutput?: DurableDynamicCallbackReference;
   } = { execute };
-  if (labelStart !== undefined) callbacks.label = { start: labelStart };
+  if (labelComplete !== undefined || labelDelta !== undefined || labelStart !== undefined) {
+    callbacks.label = {
+      complete: labelComplete,
+      delta: labelDelta,
+      start: labelStart,
+    };
+  }
   if (approvalKey !== undefined) callbacks.approvalKey = approvalKey;
   if (approvalRequest !== undefined) callbacks.approvalRequest = approvalRequest;
   if (approvalResponse !== undefined) callbacks.approvalResponse = approvalResponse;
