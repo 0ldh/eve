@@ -292,3 +292,165 @@ describe("nextTurnDelivery routing", () => {
     expect(stateCursor.sessionState).toBe(routedSessionState);
   });
 });
+
+function completion(taskId: string): DeliverHookPayload {
+  return {
+    kind: "deliver",
+    taskDeliveryId: `${taskId}:ready:completed`,
+    payloads: [
+      {
+        message: taskId,
+        task: {
+          views: [
+            {
+              taskId,
+              status: "completed",
+              metadata: { kind: "subagent", name: "worker" },
+              lastOutput: { type: "result", data: taskId },
+            },
+          ],
+        },
+      },
+    ],
+    deliveryMetadata: [
+      {
+        payloadIndex: 0,
+        deliveryId: taskId,
+        channelKind: "eve",
+        channelName: "eve",
+        acceptedDeploymentId: "deployment",
+      },
+    ],
+  };
+}
+
+function batchingInput() {
+  const input = waitInput(createMockInbox([]));
+  input.stateCursor.adoptState({
+    sessionState: {
+      ...sessionState,
+      snapshot: {
+        version: 1,
+        session: {
+          sessionId: "session",
+          continuationToken: "token",
+          history: [],
+          agent: { system: "" },
+          state: {
+            "eve.tasks": {
+              version: 2,
+              tasks: Array.from({ length: 100 }, (_, index) => ({
+                taskId: `task_${index}`,
+                taskRunId: `run-${index}`,
+                taskInboxToken: `inbox-${index}`,
+                createdByTurnId: "turn-1",
+                metadata: { kind: "subagent", name: "worker" },
+              })).concat([
+                {
+                  taskId: "other-cohort",
+                  taskRunId: "other-run",
+                  taskInboxToken: "other-inbox",
+                  createdByTurnId: "turn-2",
+                  metadata: { kind: "subagent", name: "worker" },
+                },
+              ]),
+            },
+          },
+        },
+      },
+    },
+  });
+  vi.mocked(routeDeliverToChildren).mockImplementation(
+    async ({ delivery, sessionState, serializedContext }) => ({
+      kind: "continue",
+      remainder: delivery,
+      sessionState,
+      serializedContext,
+    }),
+  );
+  return input;
+}
+
+describe("buffered task completion batching", () => {
+  beforeEach(() => vi.mocked(routeDeliverToChildren).mockReset());
+  afterEach(() => vi.mocked(routeDeliverToChildren).mockReset());
+
+  it("delivers 100 buffered sibling results and their metadata in one parent turn", async () => {
+    const input = batchingInput();
+    const deliveries = Array.from({ length: 100 }, (_, index) => completion(`task_${index}`));
+    const bufferedDeliveries = [...deliveries];
+    const next = await nextTurnDelivery({ ...input, bufferedDeliveries });
+
+    expect(next).toMatchObject({
+      kind: "turn",
+      delivery: {
+        taskDeliveryId: "task_0:ready:completed",
+        payloads: deliveries.flatMap((delivery) => delivery.payloads),
+        deliveryMetadata: deliveries.map((delivery, payloadIndex) => ({
+          ...delivery.deliveryMetadata![0],
+          payloadIndex,
+        })),
+      },
+    });
+    expect(bufferedDeliveries).toEqual([]);
+    expect(routeDeliverToChildren).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["failed", { ...completion("task_2"), taskDeliveryId: "task_2:ready:failed" }],
+    ["cancelled", { ...completion("task_2"), taskDeliveryId: "task_2:ready:cancelled" }],
+    ["input request", { ...completion("task_2"), taskDeliveryId: "task_2:input:request-1" }],
+    ["update", { ...completion("task_2"), taskDeliveryId: "task_2:update:1" }],
+    ["other cohort", completion("other-cohort")],
+    ["unknown task", completion("unknown-task")],
+    ["user message", { kind: "deliver", payloads: [{ message: "user direction" }] }],
+    [
+      "caller",
+      {
+        ...completion("task_2"),
+        caller: {
+          callId: "call",
+          subagentName: "worker",
+          replyTo: { kind: "hook", token: "reply" },
+          taskId: "task_2",
+        },
+      },
+    ],
+  ] satisfies readonly (readonly [string, DeliverHookPayload])[])(
+    "stops at a %s without reaching later siblings",
+    async (_name, boundary) => {
+      const input = batchingInput();
+      const first = completion("task_0");
+      const second = completion("task_1");
+      const later = completion("task_3");
+      const bufferedDeliveries = [first, second, boundary, later];
+      const next = await nextTurnDelivery({ ...input, bufferedDeliveries });
+      expect(next).toMatchObject({
+        kind: "turn",
+        delivery: { payloads: [...first.payloads, ...second.payloads] },
+      });
+      expect(bufferedDeliveries).toEqual([boundary, later]);
+    },
+  );
+
+  it("delivers an available completion without waiting for unfinished siblings", async () => {
+    const input = batchingInput();
+    const first = completion("task_0");
+    const next = await nextTurnDelivery({ ...input, bufferedDeliveries: [first] });
+    expect(next).toMatchObject({ kind: "turn", delivery: { payloads: first.payloads } });
+    expect(routeDeliverToChildren).toHaveBeenCalledTimes(1);
+  });
+
+  it("services ready authorization before a buffered completion batch", async () => {
+    const input = batchingInput();
+    const bufferedDeliveries = [completion("task_0"), completion("task_1")];
+    const next = await nextTurnDelivery({
+      ...input,
+      bufferedDeliveries,
+      commandInbox: createMockInbox([authorizationRead()], true),
+    });
+    expect(next.kind).toBe("authorization");
+    expect(bufferedDeliveries).toHaveLength(2);
+    expect(routeDeliverToChildren).not.toHaveBeenCalled();
+  });
+});
