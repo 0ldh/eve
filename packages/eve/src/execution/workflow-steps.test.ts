@@ -24,7 +24,7 @@ import {
   SessionTraceSeedKey,
   TurnDeliveryIdsKey,
   TurnTaskDeliveryKey,
-  TurnTaskStateKey,
+  HistoryStateKey,
 } from "#context/keys.js";
 import { BundleKey, ChannelKey } from "#runtime/sessions/runtime-context-keys.js";
 import { serializeContext } from "#context/serialize.js";
@@ -1660,7 +1660,10 @@ describe("turnStep", () => {
   });
 
   it("keeps a session-scoped dynamic model selection when the first turn is cancelled", async () => {
-    const session = createStubSession();
+    const announcement = "Available skills\n- policy: Tenant policy";
+    const session = createStubSession({
+      history: [{ role: "user", content: announcement }],
+    });
     installSessionStoreMocks([session]);
     vi.mocked(getCompiledRuntimeAgentBundle).mockResolvedValue({
       adapterRegistry: {
@@ -1689,6 +1692,7 @@ describe("turnStep", () => {
           contextWindowTokens: 1_000_000,
         });
         ctx.set(ThreadKey, "discard this turn-scoped mutation");
+        ctx.delete(HistoryStateKey);
         throw new TurnCancelledError();
       };
     });
@@ -1710,6 +1714,7 @@ describe("turnStep", () => {
       serializedContext: {
         ...createSerializedContext(),
         [TurnDeliveryIdsKey.name]: ["previous-delivery"],
+        [HistoryStateKey.name]: { availableSkills: announcement },
       },
       sessionState: createStubSessionState(),
     });
@@ -1718,6 +1723,7 @@ describe("turnStep", () => {
       action: "cancelled",
       serializedContext: {
         [TurnDeliveryIdsKey.name]: ["cancelled-delivery"],
+        [HistoryStateKey.name]: { availableSkills: announcement },
         [SessionDynamicModelReferenceKey.name]: {
           id: "anthropic/claude-opus-4.6",
           contextWindowTokens: 1_000_000,
@@ -1726,6 +1732,7 @@ describe("turnStep", () => {
     });
     expect(result.serializedContext).not.toHaveProperty(ThreadKey.name);
     expect(result.sessionState.snapshot?.session.history).toEqual([
+      { role: "user", content: announcement },
       { content: "thread=unset; user=cancel this turn", role: "user" },
     ]);
   });
@@ -2217,7 +2224,6 @@ describe("turnStep", () => {
 
   it("sets task-delivery provenance only when the runtime supplies owned task state", async () => {
     const observedTaskDeliveries: unknown[] = [];
-    const observedTaskStates: unknown[] = [];
     const metadata = { kind: "report-probe", name: "report_probe" } as const;
     const session = createStubSession({
       state: {
@@ -2245,13 +2251,11 @@ describe("turnStep", () => {
     vi.mocked(createExecutionNodeStep).mockImplementation(() => {
       return async (stepSession): Promise<StepResult> => {
         observedTaskDeliveries.push(contextStorage.getStore()?.get(TurnTaskDeliveryKey));
-        observedTaskStates.push(contextStorage.getStore()?.get(TurnTaskStateKey));
         return { next: { done: true, output: "ok" }, session: stepSession };
       };
     });
 
     const initialSerializedContext = createSerializedContext();
-    initialSerializedContext[TurnTaskStateKey.name] = "stale task state";
 
     const first = await turnStep({
       input: {
@@ -2281,10 +2285,9 @@ describe("turnStep", () => {
     });
 
     expect(observedTaskDeliveries).toEqual(["settled", "none", "none"]);
-    expect(observedTaskStates).toEqual([undefined, undefined, undefined]);
   });
 
-  it("supplies initiating task state after the active turn accepts delegated work", async () => {
+  it.each(["none", "initiating"] as const)("sets initiating task phase (%s)", async (phase) => {
     const tasksBundle = {
       adapterRegistry: {
         adaptersByKind: new Map([[threadContextAdapter.kind, threadContextAdapter]]),
@@ -2336,17 +2339,15 @@ describe("turnStep", () => {
 
     let observedInput: unknown;
     let observedPhase: unknown;
-    let observedTaskState: unknown;
     vi.mocked(createExecutionNodeStep).mockImplementation(() => {
       return async (stepSession, stepInput): Promise<StepResult> => {
         observedInput = stepInput;
         observedPhase = contextStorage.getStore()?.get(TurnTaskDeliveryKey);
-        observedTaskState = contextStorage.getStore()?.get(TurnTaskStateKey);
         return { next: { done: true, output: "ok" }, session: stepSession };
       };
     });
     const serializedContext = createSerializedContext();
-    serializedContext[TurnTaskDeliveryKey.name] = "none";
+    serializedContext[TurnTaskDeliveryKey.name] = phase;
 
     await turnStep({
       input: undefined,
@@ -2363,9 +2364,6 @@ describe("turnStep", () => {
     });
 
     expect(observedPhase).toBe("initiating");
-    expect(observedTaskState).toBe(
-      '[Task state]\n{"tasks":[{"name":"report_probe","status":"pending","taskId":"task_1"}]}',
-    );
     expect(observedInput).toBeUndefined();
   });
 
