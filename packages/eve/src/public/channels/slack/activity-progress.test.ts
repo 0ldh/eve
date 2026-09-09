@@ -236,7 +236,7 @@ describe("Slack activity activity", () => {
     });
 
     expect(activityMessages(settled).get("turn")).toContain("✓ tester &amp; reviewer");
-    expect(activityMessages(settled).get("turn")).toContain("– search &lt;web&gt;");
+    expect(activityMessages(settled).get("turn")).toContain("⊘ search &lt;web&gt;");
     expect(requests.map((request) => request.operation)).toEqual([
       "conversations.replies",
       "chat.postMessage",
