@@ -18,6 +18,8 @@ import type { ToolContext } from "#tools/definition.js";
 import { createTaskMessage, type TaskExec } from "#tools/task.js";
 
 export interface WorkflowBodyDefinition {
+  /** Advertised by the parent driver; absent on runs started before this capability. */
+  readonly authorizationSupported?: boolean;
   readonly callId: string;
   readonly executeInput?: JsonValue;
   readonly input: JsonObject;
@@ -54,7 +56,11 @@ export async function executeWorkflowBody(
 ): Promise<WorkflowBodyResult> {
   const from = createWorkflowBodyRef(input);
   const ctx = createWorkflowBodyContext(input, signal);
-  attachWorkflowToolRunContext(ctx, { from, owner: input.owner });
+  attachWorkflowToolRunContext(ctx, {
+    from,
+    owner: input.owner,
+    authorizationSupported: input.execution === "blocking" || input.authorizationSupported === true,
+  });
   let reportCount = 0;
 
   try {
@@ -142,8 +148,12 @@ function createWorkflowBodyContext(
     getSandbox: () => unavailable("getSandbox()", "the session sandbox belongs to the turn"),
     getSkill: () => unavailable("getSkill()", "skills are read through the session sandbox"),
     getToken: () =>
-      unavailable("getToken()", 'read credentials from the environment inside a "use step" helper'),
-    requireAuth: () => unavailable("requireAuth()", "a workflow body cannot park on authorization"),
+      unavailable("getToken()", 'pass ctx directly to a "use step" helper to resolve credentials'),
+    requireAuth: () =>
+      unavailable(
+        "requireAuth()",
+        'pass ctx directly to a "use step" helper to request authorization',
+      ),
     session: input.session,
     toolName: input.toolName,
   };
