@@ -20,6 +20,11 @@ vi.mock("./cancel-indexed-session-tasks-step.js", () => ({
 
 import { cancelAllIndexedSessionTasksStep } from "#execution/cancel-indexed-session-tasks-step.js";
 
+beforeEach(() => {
+  vi.mocked(routeDeliverToChildren).mockReset();
+  vi.mocked(cancelAllIndexedSessionTasksStep).mockReset();
+});
+
 interface ScriptedRead {
   readonly result: IteratorResult<SessionInboxPayload>;
   readonly source: SessionInboxSource;
@@ -112,10 +117,6 @@ function waitInput(inbox: SessionCommandInbox): Parameters<typeof nextTurnDelive
 }
 
 describe("nextTurnDelivery", () => {
-  afterEach(() => {
-    vi.mocked(routeDeliverToChildren).mockReset();
-  });
-
   it("surfaces an authorization callback as its own instruction", async () => {
     const inbox = createMockInbox([authorizationRead()]);
 
@@ -234,7 +235,6 @@ describe("nextTurnDelivery", () => {
 });
 
 describe("nextTurnDelivery routing", () => {
-  beforeEach(() => vi.clearAllMocks());
   it("keeps waiting instead of starting a parent turn for a fully routed task response", async () => {
     const sessionState = {
       continuationToken: "token",
