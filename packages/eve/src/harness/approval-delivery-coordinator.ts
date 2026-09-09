@@ -1,3 +1,4 @@
+import { resolveTextToResponses } from "#channel/resolve-text.js";
 import type { SessionAuthContext } from "#channel/types.js";
 import { buildCallbackContext } from "#context/build-callback-context.js";
 import { contextStorage } from "#context/container.js";
@@ -92,6 +93,49 @@ export function shouldPrepareApprovalPolicyTools(input: {
           (challenge) => getAuthorizationResult(challenge.name) !== undefined,
         ) ??
           false)),
+  );
+}
+
+/** Returns whether this invocation can replay a previously approved tool call. */
+export function shouldPrepareApprovalReplayTools(input: {
+  readonly now?: number;
+  readonly session: HarnessSession;
+  readonly stepInput?: StepInput;
+}): boolean {
+  if (shouldPrepareApprovalPolicyTools(input)) return true;
+
+  const batches = getPendingInputBatches(input.session.state);
+  const responses = [
+    ...(input.stepInput?.attributedInputResponses ?? []).map(({ response }) => response),
+    ...(input.stepInput?.inputResponses ?? []),
+  ];
+  const batch = batches.length === 1 ? batches[0] : undefined;
+  if (
+    batch !== undefined &&
+    typeof input.stepInput?.message === "string" &&
+    !responses.some((response) =>
+      batch.requests.some((request) => request.requestId === response.requestId),
+    )
+  ) {
+    // Match the text-only approvals resolvePendingInput will consume after preparation.
+    responses.push(
+      ...resolveTextToResponses(
+        input.stepInput.message,
+        batch.requests.filter(
+          (request) => !batch.responseAuthRequiredRequestIds?.includes(request.requestId),
+        ),
+      ),
+    );
+  }
+  const approvedRequestIds = new Set(
+    responses
+      .filter((response) => response.optionId === "approve")
+      .map((response) => response.requestId),
+  );
+  return batches.some((batch) =>
+    batch.requests.some(
+      (request) => isApprovalRequest(request) && approvedRequestIds.has(request.requestId),
+    ),
   );
 }
 

@@ -140,6 +140,64 @@ afterEach(() => {
 });
 
 describe("runInitCommand", () => {
+  it("creates an agent workspace from comma-separated names", async () => {
+    const parentDirectory = await mkdtemp(join(tmpdir(), "eve-init-agents-"));
+    const output = logger();
+    const deps = dependencies();
+
+    await runInitCommand(
+      output,
+      parentDirectory,
+      "operations",
+      {
+        agents: ["foreman", "researcher"],
+      },
+      deps,
+    );
+
+    const projectRoot = join(parentDirectory, "operations");
+    await expect(
+      pathExists(join(projectRoot, "agents", "foreman", "agent", "agent.ts")),
+    ).resolves.toBe(true);
+    await expect(
+      pathExists(join(projectRoot, "agents", "researcher", "agent", "agent.ts")),
+    ).resolves.toBe(true);
+    await expect(pathExists(join(projectRoot, "agent"))).resolves.toBe(false);
+    await expect(readFile(join(projectRoot, "tsconfig.json"), "utf8")).resolves.toContain(
+      '"agents/**/*.ts"',
+    );
+    expect(deps.selectInitHandoff).toHaveBeenCalledWith({ agentName: "operations" });
+    expect(deps.spawnPackageManager).toHaveBeenCalledWith("pnpm", projectRoot, [
+      "exec",
+      "eve",
+      "dev",
+      "--onboard",
+    ]);
+  });
+
+  it("adds only agent files to an existing workspace", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "eve-init-workspace-agent-"));
+    await mkdir(join(workspaceRoot, "agents", "support", "agent"), { recursive: true });
+    await writeFile(
+      join(workspaceRoot, "package.json"),
+      '{"name":"workspace","dependencies":{"eve":"*"}}\n',
+    );
+    const beforePackageJson = await readFile(join(workspaceRoot, "package.json"), "utf8");
+    const output = logger();
+    const deps = dependencies();
+
+    await runInitCommand(output, workspaceRoot, "billing", {}, deps);
+
+    await expect(
+      pathExists(join(workspaceRoot, "agents", "billing", "agent", "agent.ts")),
+    ).resolves.toBe(true);
+    await expect(readFile(join(workspaceRoot, "package.json"), "utf8")).resolves.toBe(
+      beforePackageJson,
+    );
+    expect(deps.runPackageManagerInstall).not.toHaveBeenCalled();
+    expect(deps.tryInitializeGit).not.toHaveBeenCalled();
+  });
+
   it("creates the base agent with the runtime default model and invoking eve dependency", async () => {
     const parentDirectory = await mkdtemp(join(tmpdir(), "eve-init-base-"));
     const output = logger();
@@ -176,8 +234,7 @@ describe("runInitCommand", () => {
       "exec",
       "eve",
       "dev",
-      "--input",
-      "/model",
+      "--onboard",
     ]);
     // Substring assertions keep the expectations color-agnostic; picocolors
     // decides at import time whether the strings carry escape codes. The boot
@@ -370,8 +427,7 @@ describe("runInitCommand", () => {
         "exec",
         "eve",
         "dev",
-        "--input",
-        "/model",
+        "--onboard",
       ]);
       expect(output.messages[1]).toContain("Created an eve agent in ");
       expect(output.messages[1]).toContain(projectPath);
@@ -396,9 +452,9 @@ describe("runInitCommand", () => {
   });
 
   it.each([
-    ["npm", ["exec", "--", "eve", "dev", "--input", "/model"]],
-    ["yarn", ["eve", "dev", "--input", "/model"]],
-    ["bun", ["x", "eve", "dev", "--input", "/model"]],
+    ["npm", ["exec", "--", "eve", "dev", "--onboard"]],
+    ["yarn", ["eve", "dev", "--onboard"]],
+    ["bun", ["x", "eve", "dev", "--onboard"]],
   ] as const)(
     "scaffolds a fresh project owned by the invoking manager %s without package-manager pins",
     async (kind, devArguments) => {
@@ -459,16 +515,15 @@ describe("runInitCommand", () => {
       "x",
       "eve",
       "dev",
-      "--input",
-      "/model",
+      "--onboard",
     ]);
   });
 
   it.each([
-    ["npm", "package-lock.json", "bun", ["exec", "--", "eve", "dev", "--input", "/model"]],
-    ["yarn", "yarn.lock", "npm", ["eve", "dev", "--input", "/model"]],
-    ["bun", "bun.lock", "npm", ["x", "eve", "dev", "--input", "/model"]],
-    ["pnpm", "pnpm-lock.yaml", "npm", ["exec", "eve", "dev", "--input", "/model"]],
+    ["npm", "package-lock.json", "bun", ["exec", "--", "eve", "dev", "--onboard"]],
+    ["yarn", "yarn.lock", "npm", ["eve", "dev", "--onboard"]],
+    ["bun", "bun.lock", "npm", ["x", "eve", "dev", "--onboard"]],
+    ["pnpm", "pnpm-lock.yaml", "npm", ["exec", "eve", "dev", "--onboard"]],
   ] as const)(
     "scaffolds a fresh named project with the ancestor %s lockfile before the launcher",
     async (kind, lockfile, invokingManager, devArguments) => {
@@ -640,8 +695,8 @@ describe("runInitCommand", () => {
   });
 
   it.each([
-    ["yarn", "yarn.lock", ["eve", "dev", "--input", "/model"]],
-    ["bun", "bun.lock", ["x", "eve", "dev", "--input", "/model"]],
+    ["yarn", "yarn.lock", ["eve", "dev", "--onboard"]],
+    ["bun", "bun.lock", ["x", "eve", "dev", "--onboard"]],
   ] as const)(
     "scaffolds a fresh %s workspace member without nested root-only package fields",
     async (kind, lockfile, devArguments) => {
@@ -719,8 +774,7 @@ describe("runInitCommand", () => {
       "--",
       "eve",
       "dev",
-      "--input",
-      "/model",
+      "--onboard",
     ]);
   });
 
@@ -744,8 +798,7 @@ describe("runInitCommand", () => {
       "exec",
       "eve",
       "dev",
-      "--input",
-      "/model",
+      "--onboard",
     ]);
   });
 
@@ -772,8 +825,7 @@ describe("runInitCommand", () => {
       "exec",
       "eve",
       "dev",
-      "--input",
-      "/model",
+      "--onboard",
     ]);
   });
 
@@ -1206,7 +1258,7 @@ describe("runInitCommand", () => {
     expect(deps.spawnPackageManager).toHaveBeenCalledWith(
       "pnpm",
       join(parentDirectory, "my-agent"),
-      ["exec", "eve", "dev", "--input", "/model"],
+      ["exec", "eve", "dev", "--onboard"],
     );
   });
 

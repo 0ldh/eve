@@ -1,7 +1,8 @@
 /**
- * Closed-contract dispatch surface between session-mutating step
- * bodies (latest deployment) and the durable driver workflow (pinned
- * to whichever deployment called `start()`).
+ * Closed-contract dispatch surface between session-mutating step bodies
+ * (the accepting deployment when stamped, otherwise the driver's deployment)
+ * and the durable driver workflow (pinned to whichever deployment called
+ * `start()`).
  *
  * The driver matches on `kind` and follows a fixed playbook per arm.
  * Adding a new arm is breaking (pinned drivers can't dispatch an
@@ -18,17 +19,18 @@ import type { TokenUsage } from "#shared/token-usage.js";
 interface DurableStepResultFields {
   readonly backgroundTaskState?: DurableSessionState;
   readonly backgroundTasks?: StepResult["backgroundTasks"];
+  /** The guarded inline step deferred before mutating state. */
+  readonly requiresChildDispatch?: true;
   readonly serializedContext: Record<string, unknown>;
   readonly sessionState: DurableSessionState;
 }
 
-/** Result returned by the latest turn step to its durable driver workflow. */
+/** Result returned by a turn step to its durable driver workflow. */
 export type DurableStepResult = (
   | {
       readonly action: "continue" | "done";
       readonly output?: unknown;
       readonly isError?: boolean;
-      readonly sleepDurationMs?: number;
       readonly usage?: TokenUsage;
       readonly usageDelta?: TokenUsage;
     }
@@ -39,15 +41,12 @@ export type DurableStepResult = (
       readonly authorizationNames?: readonly string[];
       readonly hasPendingAuthorization: boolean;
       readonly hasPendingInputBatch: boolean;
-      readonly pendingRuntimeActionKeys?: readonly string[];
-      readonly tasksEnabled?: boolean;
-      readonly sleepDurationMs?: number;
+      readonly pendingCoordinationCallIds?: readonly string[];
       readonly settled?: SettledTurn;
     }
   | {
-      readonly action: "dispatch-workflow-runtime-actions";
-      readonly pendingRuntimeActionKeys: readonly string[];
-      readonly sleepDurationMs?: number;
+      readonly action: "dispatch-workflow-tasks";
+      readonly pendingTaskCallIds: readonly string[];
     }
 ) &
   DurableStepResultFields;
@@ -89,14 +88,14 @@ export type NextDriverAction =
       readonly settled?: SettledTurn;
     }
   | {
-      readonly kind: "dispatch-runtime-actions";
-      readonly pendingActionKeys: readonly string[];
+      readonly kind: "dispatch-coordination";
+      readonly pendingCallIds: readonly string[];
       readonly sessionState: DurableSessionState;
       readonly serializedContext: Record<string, unknown>;
     }
   | {
-      readonly kind: "dispatch-workflow-runtime-actions";
-      readonly pendingActionKeys: readonly string[];
+      readonly kind: "dispatch-workflow-tasks";
+      readonly pendingCallIds: readonly string[];
       readonly sessionState: DurableSessionState;
       readonly serializedContext: Record<string, unknown>;
     };

@@ -16,6 +16,8 @@ import type {
 } from "#instrumentation/lifecycle.js";
 import { actionIdempotencyKey } from "#instrumentation/lifecycle.js";
 import { contentAttribute } from "#tracing/agent-otel-content.js";
+import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
+import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 
@@ -144,12 +146,15 @@ export function createAgentToolInstrumentation(input: {
     const state: ToolSpanState = {
       actionKey,
       attemptId: event.scope.attemptId,
-      context: contextFromSpanContext({
-        isRemote: false,
-        spanId,
-        traceFlags: parent.spanContext.traceFlags,
-        traceId: parent.spanContext.traceId,
-      }),
+      context: withChannelAudience(
+        contextFromSpanContext({
+          isRemote: false,
+          spanId,
+          traceFlags: parent.spanContext.traceFlags,
+          traceId: parent.spanContext.traceId,
+        }),
+        event.scope.channelAudience,
+      ),
       event,
       fallbackParent: parent.context,
       idempotencyKey: event.idempotencyKey,
@@ -214,6 +219,7 @@ function toolAttributes(event: InstrumentationToolCallStartedEvent): Record<stri
     "gen_ai.tool.call.id": event.callId,
     "gen_ai.tool.name": event.toolName,
     "gen_ai.tool.type": "function",
+    ...agentSpanNamingAttributes(`execute_tool ${event.toolName}`, "execute_tool"),
   };
 }
 

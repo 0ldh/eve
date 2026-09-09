@@ -1,6 +1,5 @@
 import type { AgentSourceManifest } from "#discover/manifest.js";
 import type { ModuleSourceRef } from "#shared/source-ref.js";
-import type { WebSearchProvider } from "#shared/web-search.js";
 import {
   type CompiledAgentDefinition,
   type CompiledAgentManifest,
@@ -37,6 +36,10 @@ import { assertInstrumentationLayoutConfig } from "#compiler/instrumentation-lay
 import { compileAgentConfig } from "#compiler/normalize-agent-config.js";
 import { compileChannelDefinition } from "#compiler/normalize-channel.js";
 import { compileConnectionDefinition } from "#compiler/normalize-connection.js";
+import {
+  applyDefaultToolPolicy,
+  assertFrameworkToolPolicy,
+} from "#compiler/default-tool-policy.js";
 import {
   loadModuleBackedDefinition,
   type ManifestCompileContext,
@@ -139,16 +142,6 @@ export async function compileAgentManifest(
     owner: { kind: "application" },
   });
 
-  const allNodeManifests = [root.manifest, ...root.descendants.map((node) => node.agent)];
-  const backgroundTool = allNodeManifests
-    .flatMap((node) => node.tools)
-    .find((tool) => tool.execution === "background");
-  if (backgroundTool !== undefined && root.manifest.config.experimental?.tasks !== true) {
-    throw new Error(
-      `Background tool "${backgroundTool.name}" requires experimental.tasks: true in the root agent config.`,
-    );
-  }
-
   const diagnosticsSummary = summarizeCompilerDiagnostics(diagnostics);
   const subagents: CompiledSubagentNode[] = root.descendants.map((subagent) =>
     subagent.configResolver === undefined
@@ -194,6 +187,7 @@ class AgentGraphCompiler {
       source: phaseOne.selectedConfig.source,
     });
     assertRootOnlyConfig(config, input.isRoot, input.manifest.agentId);
+    applyDefaultToolPolicy(phaseOne, config);
 
     const externalDependencies = mergeExternalDependencies(
       input.inheritedExternalDependencies,
@@ -291,6 +285,7 @@ class AgentGraphCompiler {
           source: phaseOne.selectedConfig.source,
         });
         assertRootOnlyConfig(config, false, source.manifest.agentId);
+        applyDefaultToolPolicy(phaseOne, config);
       } else {
         dynamicBuildDependencies = normalized.build?.externalDependencies;
       }
@@ -502,7 +497,6 @@ class AgentGraphCompiler {
     let sandbox: CompiledSandboxDefinition | undefined;
     let instrumentation: ModuleSourceRef | undefined;
     let workflowTool: CompiledWorkflowToolDefinition | undefined;
-    let webSearchProvider: WebSearchProvider | undefined;
     const selectedSourceIds = collectSelectedSourceIds(state.composed);
     const loadNamespace = state.evaluation.loadNamespace;
 
@@ -614,13 +608,16 @@ class AgentGraphCompiler {
             binding: binding!,
             loadNamespace,
           });
+          assertFrameworkToolPolicy(candidate, result);
           if (result.kind === "disabled") {
             state.composed = disableComposedCandidate({ candidate, composed: state.composed });
             delete state.bindings[candidate.sourceId];
             selectedSourceIds.delete(candidate.sourceId);
           } else if (result.kind === "tool") {
             tools.push(result.definition);
-            state.evaluation.requireRuntimeEntry(candidate.sourceId);
+            if (result.definition.hasExecute) {
+              state.evaluation.requireRuntimeEntry(candidate.sourceId);
+            }
           } else if (result.kind === "dynamic-tool") {
             dynamicTools.push(withExtensionNamespace(result.definition, candidate.owner));
             state.evaluation.requireRuntimeEntry(candidate.sourceId);
@@ -630,7 +627,6 @@ class AgentGraphCompiler {
           } else {
             assertNonExtensionSpecialTool(candidate as AgentModuleCandidate, "Web search");
             tools.push(result.definition);
-            webSearchProvider = result.provider;
           }
           break;
         }
@@ -693,7 +689,6 @@ class AgentGraphCompiler {
       skills,
       sourceComposition: state.composed.composition,
       tools,
-      webSearchProvider,
       workflowTool,
     });
   }

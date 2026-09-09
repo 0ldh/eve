@@ -1,6 +1,5 @@
 import type { ModelMessage } from "ai";
 
-import { AGENT_TOOL_NAME } from "#tools/framework/agent-contract.js";
 import { composeRuntimeBasePrompt } from "#runtime/prompt/compose.js";
 import type { PreparedRuntimeTool } from "#runtime/sessions/turn.js";
 import type { ResolvedAgent, ResolvedAgentDefinition } from "#runtime/types.js";
@@ -81,6 +80,7 @@ export const BOOTSTRAP_RUNTIME_SYSTEM_PROMPT =
  */
 export function createResolvedRuntimeTurnAgent(input: {
   readonly agent: ResolvedAgent;
+  readonly dynamicSubagentsAvailable?: boolean;
   readonly id?: string;
   readonly nodeId?: string;
   readonly tools: readonly PreparedRuntimeTool[];
@@ -96,9 +96,8 @@ export function createResolvedRuntimeTurnAgent(input: {
   );
   const subagentFrameworkRootTool = input.tools.some(
     (tool) =>
-      tool.kind === "authored-tool" &&
-      tool.owner.kind === "framework" &&
-      tool.name === AGENT_TOOL_NAME,
+      tool.behavior?.handling?.kind === "dispatch" &&
+      tool.behavior.handling.target.kind === "self-agent-call",
   );
   const base: RuntimeTurnAgentBase = {
     availableSkills: agent.skills.map((skill) => ({
@@ -112,8 +111,10 @@ export function createResolvedRuntimeTurnAgent(input: {
     instructions: composeRuntimeBasePrompt({
       connections: agent.connections,
       instructions: agent.instructions,
-      subagentsAvailable: subagentDeclaredTool || subagentFrameworkRootTool,
-      tasksEnabled: config?.experimental?.tasks === true,
+      subagentsAvailable:
+        input.dynamicSubagentsAvailable === true ||
+        subagentDeclaredTool ||
+        subagentFrameworkRootTool,
       toolsAvailable: input.tools.length > 0,
       workspaceSpec: agent.workspaceSpec,
     }),

@@ -23,6 +23,9 @@ import { defineInstructions } from "#public/definitions/instructions.js";
 import { defineSchedule } from "#public/definitions/schedule.js";
 import { defineSkill } from "#public/definitions/skill.js";
 import { resolveAgent } from "#runtime/resolve-agent.js";
+import { resolveRuntimeAgentGraph } from "#runtime/resolve-agent-graph.js";
+import { compiledAgentManifestSchema } from "#compiler/manifest.js";
+import { defineWorkflowTool } from "#tools/workflow-definition.js";
 import { defineTool, disableTool } from "#tools/definition.js";
 import { defineMemory } from "#public/memory/index.js";
 import { defineDynamic } from "#dynamic/definition.js";
@@ -110,6 +113,178 @@ describe("compileAgentManifest source graph", () => {
       sourceRegistry,
     ]);
     expect(() => validateCompiledModuleMap(compiled, moduleMap)).not.toThrow();
+  });
+
+  it("omits default tools while preserving authored tools and same-slug overrides", async () => {
+    const sourceRegistry = registry([
+      {
+        logicalPath: "agent.ts",
+        loadNamespace: async () => ({
+          default: defineAgent({
+            defaultTools: false,
+            model: "openai/gpt-5.4",
+          }),
+        }),
+      },
+      {
+        logicalPath: "tools/bash.ts",
+        loadNamespace: async () => ({
+          default: defineTool({
+            description: "Application-owned shell replacement.",
+            execute: () => ({ ok: true }),
+            inputSchema: { type: "object" },
+          }),
+        }),
+      },
+      {
+        logicalPath: "tools/weather.ts",
+        loadNamespace: async () => ({
+          default: defineTool({
+            description: "Gets weather.",
+            execute: () => ({ ok: true }),
+            inputSchema: { type: "object" },
+          }),
+        }),
+      },
+    ]);
+
+    const compiled = await compileAgentManifest(manifest(), {
+      sourceRegistries: [sourceRegistry],
+    });
+
+    expect(compiled.config.defaultTools).toBe(false);
+    expect(compiled.tools.map((tool) => tool.name).sort()).toEqual(["bash", "weather"]);
+    expect(compiled.dynamicTools.map((tool) => tool.slug)).toEqual(["connection_search"]);
+    expect(compiled.tools.find((tool) => tool.name === "bash")?.description).toBe(
+      "Application-owned shell replacement.",
+    );
+    expect(
+      compiled.sourceComposition.entries
+        .filter(
+          (entry) =>
+            entry.source.layer === "framework-default" &&
+            entry.source.logicalPath.startsWith("tools/"),
+        )
+        .map((entry) => entry.source.logicalPath),
+    ).toEqual(["tools/bash.ts"]);
+  });
+
+  it("rejects disabling required connection search", async () => {
+    const sourceRegistry = registry([
+      {
+        logicalPath: "tools/connection_search.ts",
+        loadNamespace: async () => ({ default: disableTool() }),
+      },
+    ]);
+
+    await expect(
+      compileAgentManifest(manifest(), { sourceRegistries: [sourceRegistry] }),
+    ).rejects.toThrow(
+      'The required "connection_search" tool cannot be disabled. Remove "agent/tools/connection_search.ts" or export a replacement tool from it.',
+    );
+  });
+
+  it.each(["agent", "task_cancel", "task_update"])(
+    "rejects overriding closed framework tool %s",
+    async (toolName) => {
+      const sourceRegistry = registry([
+        {
+          logicalPath: `tools/${toolName}.ts`,
+          loadNamespace: async () => ({
+            default: defineTool({
+              description: "Replacement tool.",
+              execute: async () => null,
+              inputSchema: {},
+            }),
+          }),
+        },
+      ]);
+
+      await expect(
+        compileAgentManifest(manifest(), { sourceRegistries: [sourceRegistry] }),
+      ).rejects.toThrow(
+        `The framework "${toolName}" tool cannot be overridden. Re-export it from "eve/tools/${toolName}" or disable it with disableTool().`,
+      );
+    },
+  );
+
+  it("compiles a workflow tool with programmatic executor metadata", async () => {
+    const execute = async () => ({ ok: true });
+    Reflect.set(execute, "workflowId", "workflow//example/tool//execute");
+    const sourceRegistry = registry([
+      {
+        logicalPath: "tools/durable.ts",
+        loadNamespace: async () => ({
+          default: defineWorkflowTool({
+            description: "Runs durably.",
+            execute,
+            inputSchema: { type: "object" },
+          }),
+        }),
+      },
+    ]);
+
+    const compiled = await compileAgentManifest(manifest(), {
+      sourceRegistries: [sourceRegistry],
+    });
+
+    expect(compiled.tools.find((tool) => tool.name === "durable")?.behavior).toEqual({
+      availability: [],
+      handling: {
+        kind: "workflow-tool",
+        workflowId: "workflow//example/tool//execute",
+      },
+      shape: { lifetime: "step", suspend: "workflow" },
+    });
+  });
+
+  it("preserves selected native behavior through serialization and runtime preparation", async () => {
+    const sourceRegistry = registry([
+      {
+        logicalPath: "tools/web_search.ts",
+        loadNamespace: async () => ({ default: webSearch({ provider: "parallel" }) }),
+      },
+    ]);
+    const compiled = await compileAgentManifest(manifest(), {
+      sourceRegistries: [sourceRegistry],
+    });
+    const serialized = compiledAgentManifestSchema.parse(JSON.parse(JSON.stringify(compiled)));
+    const moduleMap = await createProgrammaticCompiledModuleMap(serialized, [
+      frameworkAgentSourceRegistry,
+      sourceRegistry,
+    ]);
+    const graph = await resolveRuntimeAgentGraph({ manifest: serialized, moduleMap });
+
+    expect(serialized.tools.find((tool) => tool.name === "agent")).toMatchObject({
+      hasExecute: true,
+    });
+    expect(serialized.tools.find((tool) => tool.name === "ask_question")).toMatchObject({
+      behavior: {
+        availability: ["requires-request-input"],
+        handling: { kind: "request-input", request: "question" },
+      },
+      hasExecute: false,
+    });
+    expect(serialized.tools.find((tool) => tool.name === "web_search")).toMatchObject({
+      behavior: {
+        availability: [],
+        handling: { kind: "provider-tool", provider: "parallel" },
+      },
+      hasExecute: false,
+    });
+    expect(graph.root.turnAgent.tools.find((tool) => tool.name === "agent")).toMatchObject({
+      rootOnly: true,
+      task: {
+        nodeId: "__root__",
+        resultKind: "subagent",
+        workflowId: expect.stringContaining("subagentToolExecuteWorkflow"),
+      },
+    });
+    expect(graph.root.turnAgent.tools.find((tool) => tool.name === "web_search")).toMatchObject({
+      behavior: {
+        handling: { kind: "provider-tool", provider: "parallel" },
+      },
+    });
   });
 
   it("loads the selected config before any non-config definition", async () => {

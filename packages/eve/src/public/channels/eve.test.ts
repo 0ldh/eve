@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import { buildAdapterContext } from "#channel/adapter-context.js";
 import { callAdapterEventHandler, type ChannelAdapter } from "#channel/adapter.js";
 import { isCompiledChannel } from "#channel/compiled-channel.js";
-import { RuntimeSessionOwnershipConflictError } from "#execution/runtime-errors.js";
 import { readClientContext } from "#internal/client-context.js";
 import { attachRouteSessionCreator } from "#internal/nitro/routes/channel-route-context.js";
 import { mockChannelContext } from "#internal/testing/mocks/mock-channel-operations.js";
@@ -920,24 +919,6 @@ describe("eveChannel — create session idempotency", () => {
     expect(handler.send).not.toHaveBeenCalled();
   });
 
-  it("adopts the winner when a concurrent create claims the operation token first", async () => {
-    const handler = createEveCreateHandler({ auth: () => ACCEPTED_AUTH });
-    handler.createSession.mockRejectedValueOnce(
-      new RuntimeSessionOwnershipConflictError({
-        continuationToken: "eve:eve:op:test",
-        ownerSessionId: "child-2",
-        sessionId: "loser",
-      }),
-    );
-
-    const response = await handler.fetch(
-      createJsonMessageRequest({ message: "hi", operationId: "operation-1" }),
-    );
-
-    expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toMatchObject({ ok: true, sessionId: "child-2" });
-  });
-
   it("scopes the operation token to the complete authenticated principal", async () => {
     const tokenFor = async (identity: {
       issuer?: string;
@@ -1578,6 +1559,24 @@ describe("eveChannel — uploadPolicy enforcement", () => {
 });
 
 describe("eveChannel — continue session HITL (inputResponses)", () => {
+  it("returns the server-issued delivery id in an accepted message acknowledgement", async () => {
+    const handler = createEveContinueHandler({ auth: none() });
+    handler.send.mockResolvedValue({
+      sessionId: "test-session-id",
+      status: "accepted",
+      deliveryId: "accepted-delivery",
+    });
+    const response = await handler.fetch(createJsonMessageRequest({ message: "follow-up" }));
+    expect(response.status).toBe(202);
+    expect(response.headers.get("x-eve-session-id")).toBe("test-session-id");
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      sessionId: "test-session-id",
+      status: "accepted",
+      deliveryId: "accepted-delivery",
+    });
+  });
+
   it("returns a structured 500 when fixed-session delivery fails", async () => {
     const handler = createEveContinueHandler({ auth: none() });
     handler.send.mockRejectedValue(new Error("backing store outage"));

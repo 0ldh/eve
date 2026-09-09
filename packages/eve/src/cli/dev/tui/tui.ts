@@ -1,3 +1,4 @@
+import type { EveCliSetupStepEvent, EveCliSetupTerminalEvent } from "#cli/telemetry/index.js";
 import { Client } from "#client/index.js";
 import type { DevBootProgressReporter } from "#internal/dev-boot-progress.js";
 import { resolveInstalledPackageInfo } from "#internal/application/package.js";
@@ -34,11 +35,13 @@ export interface RunDevelopmentTuiInput extends TuiDisplayOptions {
   readonly target: DevelopmentTuiTarget;
   /** Additional request headers sent by this TUI client. */
   readonly headers?: Readonly<Record<string, string>>;
-  /**
-   * Text to seed the prompt input with after the UI launches. A bare local
-   * `/model` starts fresh-agent onboarding. Applies to the first prompt only.
-   */
+  /** Text to seed the prompt input with after the UI launches. Applies to the first prompt only. */
   readonly initialInput?: string;
+  /** Explicit fresh-agent onboarding handoff from `eve init`. */
+  readonly onboard?: boolean;
+  /** Reports timestamped steps and terminal result for fresh-agent onboarding. */
+  readonly onOnboardingStep?: (input: EveCliSetupStepEvent) => void;
+  readonly onOnboardingTerminal?: (input: EveCliSetupTerminalEvent) => void;
   /** Reports local CLI boot phases. Omitted for remote and programmatic TUI runs. */
   readonly onBootProgress?: DevBootProgressReporter;
   /** Gives setup subprocesses exclusive terminal and development-host ownership. */
@@ -141,6 +144,9 @@ export async function runDevelopmentTui(input: RunDevelopmentTuiInput): Promise<
     target,
     headers,
     initialInput,
+    onboard,
+    onOnboardingStep,
+    onOnboardingTerminal,
     onBootProgress,
     lifecycle,
     startup,
@@ -155,6 +161,7 @@ export async function runDevelopmentTui(input: RunDevelopmentTuiInput): Promise<
     prepared.kind === "local"
       ? resolveLocalDevelopmentClientOptions({
           ...headerOptions,
+          interactiveClient: true,
           serverUrl,
           token: () => resolveLinkedDevelopmentOidcToken(prepared.target.workspaceRoot),
         })
@@ -187,6 +194,9 @@ export async function runDevelopmentTui(input: RunDevelopmentTuiInput): Promise<
     options.renderer = startup.renderer;
     options.startup = startup;
   }
+  if (onboard !== undefined) options.onboard = onboard;
+  if (onOnboardingStep !== undefined) options.onOnboardingStep = onOnboardingStep;
+  if (onOnboardingTerminal !== undefined) options.onOnboardingTerminal = onOnboardingTerminal;
   if (onBootProgress !== undefined) options.onBootProgress = onBootProgress;
   if (lifecycle !== undefined) options.lifecycle = lifecycle;
   if (withExclusiveTerminal !== undefined) options.withExclusiveTerminal = withExclusiveTerminal;

@@ -17,6 +17,8 @@ import {
   resolveTracePolicyDecision,
 } from "#tracing/sampled-trace.js";
 import type { AgentSessionTraceState, AgentTraceStateStore } from "#tracing/agent-trace-state.js";
+import { readInstrumentationDecision } from "#shared/instrumentation-decision.js";
+import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
 
 interface AgentOtelSessionContextInput {
   readonly frameworkVersion: string;
@@ -51,7 +53,7 @@ export function createAgentOtelSessionContext(
     readonly traceSeed?: InstrumentationTraceContext;
   }): SpanContext => {
     if (session.traceSeed !== undefined) {
-      if (!isSampledTrace(session.traceSeed)) {
+      if (session.traceDecision.action === "drop" || !isSampledTrace(session.traceSeed)) {
         return {
           isRemote: false,
           spanId: session.traceSeed.spanId,
@@ -68,6 +70,7 @@ export function createAgentOtelSessionContext(
             "agent.name": session.agentName,
             "agent.session.id": session.sessionId,
             "agent.trace.schema.version": 3,
+            ...agentSpanNamingAttributes("agent.session"),
           },
           root: true,
         });
@@ -95,6 +98,7 @@ export function createAgentOtelSessionContext(
         "agent.name": session.agentName,
         "agent.session.id": session.sessionId,
         "agent.trace.schema.version": 3,
+        ...agentSpanNamingAttributes("agent.session"),
       },
       root: true,
     });
@@ -215,7 +219,9 @@ function resolveSessionTraceDecision(
   audience: ChannelAudience,
   policy: TraceCapturePolicy | undefined,
 ): ReturnType<typeof resolveTracePolicy> {
-  if (event.traceSeed?.decision !== undefined) return event.traceSeed.decision;
+  if (event.traceSeed?.decision !== undefined) {
+    return readInstrumentationDecision(event.traceSeed.decision) ?? { action: "drop" };
+  }
   if (event.traceSeed !== undefined) {
     return resolveTracePolicyDecision(isSampledTrace(event.traceSeed), audience);
   }

@@ -4,6 +4,7 @@ import {
   AuthKey,
   ChannelInstrumentationKey,
   ContinuationTokenKey,
+  ParentTraceContextKey,
   type Session,
   type SessionAuthContext,
   ActivityObserverKey,
@@ -11,6 +12,7 @@ import {
   SessionKey,
   ScheduleIdKey,
 } from "#context/keys.js";
+import { setChannelContext } from "#execution/channel-context.js";
 import { buildRunContext } from "#execution/runtime-context.js";
 
 function createTestSession(
@@ -273,7 +275,7 @@ describe("buildRunContext", () => {
   it("grafts parent metadata onto the child's own kind", () => {
     const parentProjection = {
       kind: "channel:slack",
-      metadata: { threadTs: "1234.5678", userId: "U123" },
+      metadata: { audience: "public" as const, threadTs: "1234.5678", userId: "U123" },
     };
     const ctx = buildRunContext({
       bundle: createMinimalBundle(),
@@ -289,7 +291,18 @@ describe("buildRunContext", () => {
 
     const result = ctx.get(ChannelInstrumentationKey)!;
     expect(result.kind).toBe("subagent");
-    expect(result.metadata).toEqual({ threadTs: "1234.5678", userId: "U123" });
+    expect(result.metadata).toEqual({
+      audience: "public",
+      threadTs: "1234.5678",
+      userId: "U123",
+    });
+
+    setChannelContext(ctx, { kind: "subagent", state: { persisted: true } });
+    expect(ctx.get(ChannelInstrumentationKey)?.metadata).toEqual({
+      audience: "public",
+      threadTs: "1234.5678",
+      userId: "U123",
+    });
   });
 
   it("uses the adapter's own projection when channelMetadata is not provided", () => {
@@ -308,5 +321,31 @@ describe("buildRunContext", () => {
     expect(projection).toBeDefined();
     expect(projection!.kind).toBe("http");
     expect(projection!.metadata).toEqual({ audience: "unknown" });
+  });
+
+  it("keeps forwarded origin policy separate from inherited channel metadata", () => {
+    const forwardedTracePolicy = {
+      ceiling: { recordInputs: false, recordOutputs: true },
+      originAudience: "private",
+    } as const;
+    const ctx = buildRunContext({
+      bundle: createMinimalBundle(),
+      run: {
+        auth: null,
+        adapter: { kind: "eve" },
+        channelMetadata: { kind: "eve", metadata: { audience: "unknown" } },
+        input: { message: "hi" },
+        mode: "task",
+        parentTraceContext: {
+          forwardedTracePolicy,
+          spanId: "1".repeat(16),
+          traceFlags: 1,
+          traceId: "2".repeat(32),
+        },
+      },
+    });
+
+    expect(ctx.get(ParentTraceContextKey)?.forwardedTracePolicy).toEqual(forwardedTracePolicy);
+    expect(ctx.get(ChannelInstrumentationKey)?.metadata.audience).toBe("unknown");
   });
 });

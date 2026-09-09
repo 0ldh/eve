@@ -7,15 +7,7 @@ import {
   TASK_VIEWS_OUTPUT_SCHEMA,
 } from "#tools/framework/task-contract.js";
 
-/**
- * Framework task tools for `experimental.tasks`.
- *
- * With the flag on, subagent calls return a task receipt instead of
- * blocking the parent turn; these tools coordinate that delegated work.
- * `task_cancel` and `task_update` are execute-less runtime actions —
- * they need durable session state and world access, so the runtime-action
- * dispatch step executes them.
- */
+/** Framework controls for durable background tasks. */
 
 const TASK_CANCEL_DESCRIPTION =
   "Request cooperative cancellation of one or more background tasks. " +
@@ -26,10 +18,7 @@ const TASK_UPDATE_DESCRIPTION =
   "Report activity, not preliminary findings or results.";
 
 /**
- * Builds the harness definitions injected when the root agent enables
- * `experimental.tasks`. Follows the implicit `agent` tool pattern:
- * inline definitions, no registry entry, session-shape hiding in
- * advertised-tools, and re-validation at dispatch.
+ * Builds harness definitions for the compiled framework task tools.
  */
 export function createTaskToolHarnessDefinitions(): readonly HarnessToolDefinition[] {
   return [
@@ -50,12 +39,7 @@ export function createTaskToolHarnessDefinitions(): readonly HarnessToolDefiniti
 }
 
 /**
- * Whether one node's sessions receive the task tools.
- *
- * Mirrors `isImplicitAgentToolAvailable`: the compile step already
- * rejects `experimental.tasks` on subagents, authored tools with the
- * same name shadow the framework tool, and `disableTool(name)` removes
- * individual tools. Root-node self-delegated children share this node's
- * config, so advertised-tools uses caller/session shape to expose only
- * `task_update` to delegated task children.
+ * Authored tools with the same name shadow these framework definitions,
+ * and `disableTool(name)` removes individual controls. advertised-tools
+ * evaluates their selected availability against persisted session metadata.
  */

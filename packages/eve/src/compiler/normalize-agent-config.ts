@@ -82,6 +82,7 @@ export async function compileAgentConfig(
       model?: CompiledRuntimeModelReference;
       thresholdPercent?: number;
     };
+    defaultTools?: boolean;
     description?: string;
     experimental?: CompiledAgentDefinition["experimental"];
     name: string;
@@ -94,6 +95,10 @@ export async function compileAgentConfig(
     name: manifest.agentId,
     source: { ...configModule },
   };
+
+  if (definition.defaultTools !== undefined) {
+    compiledConfig.defaultTools = definition.defaultTools;
+  }
 
   if (definition.description !== undefined) {
     compiledConfig.description = definition.description;
@@ -136,6 +141,7 @@ export async function compileAgentConfig(
     compiledConfig.limits = {
       maxInputTokensPerSession: definition.limits.maxInputTokensPerSession,
       maxOutputTokensPerSession: definition.limits.maxOutputTokensPerSession,
+      maxTokenCostUsdPerSession: definition.limits.maxTokenCostUsdPerSession,
       sessionTimeoutMs: definition.limits.sessionTimeoutMs,
     };
   }
@@ -178,10 +184,6 @@ function normalizeExperimentalDefinition(
 
   if (experimental.instrumentationProviders !== undefined) {
     compiledExperimental.instrumentationProviders = experimental.instrumentationProviders;
-  }
-
-  if (experimental.tasks !== undefined) {
-    compiledExperimental.tasks = experimental.tasks;
   }
 
   if (experimental.workflow !== undefined) {

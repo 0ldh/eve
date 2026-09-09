@@ -27,6 +27,7 @@ type SemanticInput =
   | "authorization-callback"
   | "start-turn"
   | "agent-continuation"
+  | "agent-steering"
   | "task-peek"
   | "task-notification"
   | "task-update"
@@ -37,6 +38,7 @@ type SemanticEvent =
   | "input-requested"
   | "authorization-required"
   | "authorization-completed"
+  | "task-failed-notification"
   | "task-ready-notification"
   | "task-update-notification";
 
@@ -109,6 +111,28 @@ export const TASK_TRANSITIONS = {
       postState: { lifecycle: "cancelled", outstandingInput: "none" },
       events: { emitted: ["task-ready-notification"] },
       sideEffects: { executed: ["task-view-append", "parent-wake", "child-abort"] },
+    },
+  }),
+  "task.lifecycle.cancel.owned-session-accepted-nonterminal": transition({
+    preState: { lifecycle: ["working", "input_required"] },
+    input: "cancel",
+    guards: ["task-is-nonterminal", "parent-session-owns-task"],
+    expected: {
+      outcome: "accepted",
+      postState: { lifecycle: "cancelled", outstandingInput: "none" },
+      events: { emitted: ["task-ready-notification"] },
+      sideEffects: { executed: ["task-view-append", "parent-wake", "child-abort"] },
+    },
+  }),
+  "task.lifecycle.cancel.default-preserves-nonterminal": transition({
+    preState: { lifecycle: "input_required" },
+    input: "cancel",
+    guards: ["session-cancel-omits-task-scope"],
+    expected: {
+      outcome: "noop",
+      postState: { lifecycle: "input_required" },
+      events: { suppressed: ["task-ready-notification"] },
+      sideEffects: { suppressed: ["task-view-append", "child-abort"] },
     },
   }),
   "task.lifecycle.cancel.noop-already-cancelled": transition({
@@ -276,10 +300,10 @@ export const TASK_TRANSITIONS = {
     input: "dispatch-start",
     guards: ["child-start-is-unreachable"],
     expected: {
-      outcome: "rejected",
-      postState: { lifecycle: "absent", dispatch: "rejected", ownership: "unowned" },
-      events: { suppressed: ["background-receipt"] },
-      sideEffects: { executed: ["child-dispatch"], suppressed: ["task-index-write"] },
+      outcome: "accepted",
+      postState: { lifecycle: "failed", dispatch: "acknowledged", ownership: "owned" },
+      events: { emitted: ["background-receipt", "task-failed-notification"] },
+      sideEffects: { executed: ["child-dispatch", "task-index-write"] },
     },
   }),
   "task.dispatch-batch.start.accepted-partial-failure": transition({
@@ -288,8 +312,8 @@ export const TASK_TRANSITIONS = {
     guards: ["one-member-is-unreachable", "other-members-are-reachable"],
     expected: {
       outcome: "accepted",
-      postState: { dispatch: "acknowledged", ownership: "owned" },
-      events: { emitted: ["background-receipt"] },
+      postState: { lifecycle: ["working", "failed"], dispatch: "acknowledged", ownership: "owned" },
+      events: { emitted: ["background-receipt", "task-failed-notification"] },
       sideEffects: { executed: ["child-dispatch", "task-index-write"] },
     },
   }),
@@ -307,12 +331,23 @@ export const TASK_TRANSITIONS = {
   "task.agent.continue.rejected-agent-busy": transition({
     preState: { agent: "busy" },
     input: "agent-continuation",
-    guards: ["agent-has-a-nonterminal-task"],
+    guards: ["agent-is-claimed-by-another-call-in-the-same-batch"],
     expected: {
       outcome: "rejected",
       postState: { agent: "busy" },
       events: { suppressed: ["background-receipt"] },
       sideEffects: { suppressed: ["task-index-write", "child-delivery"] },
+    },
+  }),
+  "task.agent.steer.accepted-busy": transition({
+    preState: { lifecycle: "working", agent: "busy", ownership: "owned" },
+    input: "agent-steering",
+    guards: ["parent-owns-admitted-task", "agent-has-a-confirmed-address"],
+    expected: {
+      outcome: "accepted",
+      postState: { lifecycle: "cancelled", agent: "busy", ownership: "owned" },
+      events: { emitted: ["background-receipt", "task-ready-notification"] },
+      sideEffects: { executed: ["child-abort", "task-index-write", "child-delivery"] },
     },
   }),
   "task.update.emitted-working": transition({

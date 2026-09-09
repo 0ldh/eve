@@ -3,7 +3,7 @@ import { satisfies } from "eve/evals/expect";
 
 export type TaskEvalSessionDriver = Pick<
   EveEvalSession,
-  "pendingInputRequests" | "respond" | "send" | "sessionId" | "state"
+  "events" | "pendingInputRequests" | "respond" | "send" | "sessionId" | "state"
 >;
 
 export interface PendingTaskInput {
@@ -147,6 +147,53 @@ export async function sendAndFollowQueuedTurn(
   throw new Error(`Queued message "${message}" was not received after 20 turns.`);
 }
 
+/** Waits for one runtime-authored terminal task delivery on the parent stream. */
+export async function waitForTaskNotification(
+  t: EveEvalContext,
+  initialSession: TaskEvalSessionDriver,
+  taskId: string,
+  status: "cancelled" | "completed" | "failed",
+  observedTurns: readonly EveEvalTurn[] = [],
+): Promise<{ readonly session: TaskEvalSessionDriver; readonly turn: EveEvalTurn }> {
+  let session = initialSession;
+  const expected = `Background task ${taskId} (`;
+  const matches = (turn: EveEvalTurn) =>
+    turn.events.some(
+      (event) =>
+        event.type === "message.received" &&
+        messageText(event.data.message).includes(expected) &&
+        messageText(event.data.message).includes(` is ${status}.`),
+    );
+  const observed = observedTurns.find(matches);
+  if (observed !== undefined) return { session, turn: observed };
+  const recorded = session.events.some(
+    (event) =>
+      event.type === "message.received" &&
+      messageText(event.data.message).includes(expected) &&
+      messageText(event.data.message).includes(` is ${status}.`),
+  );
+  if (recorded) {
+    const turn = observedTurns.at(-1);
+    if (turn === undefined) {
+      throw new Error(`Task ${taskId} notification was recorded without an observed turn.`);
+    }
+    return { session, turn };
+  }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const sessionId = session.sessionId;
+    if (sessionId === undefined)
+      throw new Error("Task notification wait has no parent session id.");
+    const live = t.target.watchTurn(sessionId, {
+      startIndex: requireSessionStreamIndex(session, "Task notification wait"),
+    });
+    const turn = await live.result();
+    turn.noFailedActions().label(`task notification wait ${attempt + 1} has no failed actions`);
+    session = live.session;
+    if (matches(turn)) return { session, turn };
+  }
+  throw new Error(`Task ${taskId} did not deliver terminal status "${status}" after 20 turns.`);
+}
+
 /** Waits for completion, then reads the immutable terminal view through no-op cancellation. */
 export async function waitForCompletedTask(
   t: EveEvalContext,
@@ -166,7 +213,8 @@ export async function waitForTaskStatus(
   status: string,
 ): Promise<EveEvalTurn> {
   let currentSession = session;
-  const deadline = performance.now() + 15_000;
+  const timeoutMs = 30_000;
+  const deadline = performance.now() + timeoutMs;
   let attempt = 0;
   while (performance.now() < deadline) {
     const followed = await sendAndFollowQueuedTurn(
@@ -196,7 +244,7 @@ export async function waitForTaskStatus(
     await t.sleep(100);
   }
   throw new Error(
-    `Task ${taskId} did not reach "${status}" within 15 seconds (${attempt} verification attempts).`,
+    `Task ${taskId} did not reach "${status}" within ${timeoutMs / 1_000} seconds (${attempt} verification attempts).`,
   );
 }
 

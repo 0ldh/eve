@@ -11,15 +11,17 @@ import {
   validateCompiledModuleMap,
 } from "#compiler/validate-artifact.js";
 
-describe("compiled agent manifest v44", () => {
+describe("compiled agent manifest v48", () => {
   it("round-trips a real compiled graph through the serialized schema", async () => {
     const { manifest } = await compileFromMemory({
+      limits: { maxTokenCostUsdPerSession: 1.5 },
       model: "openai/gpt-5.4",
       tools: [{ name: "weather" }],
     });
 
     const parsed = compiledAgentManifestSchema.parse(JSON.parse(JSON.stringify(manifest)));
     expect(parsed.version).toBe(COMPILED_AGENT_MANIFEST_VERSION);
+    expect(parsed.config.limits?.maxTokenCostUsdPerSession).toBe(1.5);
     expect(() => validateCompiledAgentManifest(parsed)).not.toThrow();
   });
 
@@ -150,6 +152,21 @@ describe("compiled agent manifest v44", () => {
         config: {
           ...manifest.config,
           experimental: { subagentPersistentSessions: true },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects the removed tasks field in compiled manifests", async () => {
+    const { manifest } = await compileFromMemory({ model: "openai/gpt-5.4" });
+    const removedExperimentalConfig = { tasks: true } as unknown;
+
+    expect(() =>
+      compiledAgentManifestSchema.parse({
+        ...manifest,
+        config: {
+          ...manifest.config,
+          experimental: removedExperimentalConfig,
         },
       }),
     ).toThrow();

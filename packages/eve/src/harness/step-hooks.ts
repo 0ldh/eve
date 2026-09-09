@@ -10,7 +10,6 @@ import type {
   TypedToolCall,
   TypedToolResult,
 } from "ai";
-import type { SessionAuthContext } from "#channel/types.js";
 import {
   createActionResultEvent,
   createActionsRequestedEvent,
@@ -23,7 +22,8 @@ import {
   createRuntimeToolResultFromStepResult,
 } from "#harness/action-result-helpers.js";
 import type { HarnessEmissionState } from "#harness/emission.js";
-import { emitStepStarted, normalizeAssistantStepFinishReason } from "#harness/emission.js";
+import { emitStepStarted } from "#harness/emission.js";
+import { normalizeAssistantStepFinishReason } from "#harness/finish-reason.js";
 import { extractToolApprovalInputRequests } from "#harness/input-extraction.js";
 import {
   type AnthropicCacheMarker,
@@ -32,7 +32,10 @@ import {
   type PromptCachePath,
 } from "#harness/prompt-cache.js";
 import { mergeProviderSafetyIdentifier } from "#harness/provider-safety.js";
-import { createRuntimeActionRequestFromToolCall } from "#harness/runtime-actions.js";
+import {
+  collectActionPresentation,
+  createPresentedRuntimeActionRequestFromToolCall,
+} from "#harness/action-presentation.js";
 import { isInvalidToolCall } from "#harness/tool-call-input-errors.js";
 import type { RuntimeToolResultActionResult } from "#shared/action-types.js";
 import {
@@ -44,6 +47,7 @@ import {
 import { contextStorage } from "#context/container.js";
 import { isAuthorizationSignal, isPendingAuthorizationToolOutput } from "#harness/authorization.js";
 import { readToolInterrupt } from "#harness/tool-interrupts.js";
+import { AuthKey } from "#context/keys.js";
 
 // ---------------------------------------------------------------------------
 // Step result type
@@ -77,7 +81,7 @@ export type HarnessStepResult = Pick<
  * Input for {@link buildStepHooks}.
  */
 interface StepHooksInput {
-  readonly auth: SessionAuthContext | null;
+  readonly auth?: import("#channel/types.js").SessionAuthContext | null;
   readonly cachePath: PromptCachePath;
   readonly emit?: HarnessEmitFn;
   readonly emissionState: HarnessEmissionState;
@@ -186,7 +190,7 @@ export function buildStepHooks(input: StepHooksInput): StepHooks {
     const providerOptions = mergeProviderSafetyIdentifier(
       modelReference,
       modelReference.providerOptions,
-      input.auth,
+      input.auth ?? contextStorage.getStore()?.get(AuthKey) ?? null,
     );
     if (input.cachePath.kind === "gateway-auto") {
       stepResult.providerOptions = mergeGatewayAutoCaching(providerOptions) as NonNullable<
@@ -270,7 +274,7 @@ export async function emitStepActions(
         !options.emittedActionCallIds?.has(toolCall.toolCallId),
     )
     .map((toolCall) =>
-      createRuntimeActionRequestFromToolCall({
+      createPresentedRuntimeActionRequestFromToolCall({
         toolCall,
         tools: options.tools,
       }),
@@ -279,7 +283,8 @@ export async function emitStepActions(
   if (actions.length > 0) {
     await emitFn(
       createActionsRequestedEvent({
-        actions,
+        actions: actions.map(({ action }) => action),
+        presentation: collectActionPresentation(actions),
         sequence: state.sequence,
         stepIndex: state.stepIndex,
         turnId: state.turnId,

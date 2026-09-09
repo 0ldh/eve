@@ -15,6 +15,8 @@ import type {
 } from "#instrumentation/lifecycle.js";
 import type { JsonValue } from "#shared/json.js";
 import { contentAttribute } from "#tracing/agent-otel-content.js";
+import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
+import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import type { AgentActionContext } from "#tracing/agent-action-instrumentation.js";
 import type { AgentSpanIdGenerator } from "#tracing/agent-span-id-generator.js";
 import { normalizeChannelAudience, type ChannelAudience } from "#shared/channel-audience.js";
@@ -105,10 +107,17 @@ export function createAgentApprovalInstrumentation(input: {
               "agent.step.attempt": state.attemptIndex,
               "agent.step.index": state.stepIndex,
               "agent.turn.id": state.turnId,
+              ...agentSpanNamingAttributes("agent.approval"),
             },
             startTime: state.startTimeMs,
           },
-          trace.setSpan(ROOT_CONTEXT, trace.wrapSpanContext({ ...state.parent, isRemote: false })),
+          withChannelAudience(
+            trace.setSpan(
+              ROOT_CONTEXT,
+              trace.wrapSpanContext({ ...state.parent, isRemote: false }),
+            ),
+            state.channelAudience,
+          ),
         ),
     );
     if (state.requestAttribute !== undefined) {

@@ -6,6 +6,7 @@ import {
   loadModuleBackedDefinition,
   type ModuleBackedDefinitionLoadOptions,
 } from "#compiler/normalize-helpers.js";
+import { readWorkflowFunctionId } from "#internal/workflow/reference.js";
 
 /**
  * Compiled tool entry produced from one authored `tools/*.ts` file.
@@ -21,7 +22,6 @@ export type CompiledToolEntry =
   | {
       readonly definition: CompiledToolDefinition;
       readonly kind: "web-search-tool";
-      readonly provider: "exa" | "parallel";
     }
   | { readonly kind: "dynamic-tool"; readonly definition: CompiledDynamicToolDefinition };
 
@@ -71,6 +71,10 @@ export async function compileToolEntry(
     }
     return {
       definition: {
+        behavior: {
+          availability: [],
+          handling: { kind: "provider-tool", provider: entry.provider },
+        },
         description:
           "Search the web for real-time information. Use this to find up-to-date information about current events, recent developments, or topics that may have changed since the knowledge cutoff.",
         exportName: source.exportName,
@@ -84,7 +88,6 @@ export async function compileToolEntry(
         requiresApproval: false,
       },
       kind: "web-search-tool",
-      provider: entry.provider,
     };
   }
 
@@ -103,13 +106,24 @@ export async function compileToolEntry(
     };
   }
 
+  const workflowId = readWorkflowFunctionId(entry.definition.execute);
+  const shape = {
+    lifetime: entry.definition.execution === "background" ? ("task" as const) : ("step" as const),
+    suspend: workflowId === undefined ? ("none" as const) : ("workflow" as const),
+  };
   return {
     kind: "tool",
     definition: {
+      behavior:
+        workflowId === undefined
+          ? entry.definition.behavior === undefined
+            ? { availability: [], shape }
+            : { ...entry.definition.behavior, shape }
+          : { availability: [], handling: { kind: "workflow-tool", workflowId }, shape },
       description: entry.definition.description,
       execution: entry.definition.execution,
       exportName: source.exportName,
-      hasExecute: true,
+      hasExecute: entry.definition.hasExecute,
       hasModelOutputProjection: entry.definition.hasModelOutputProjection,
       inputSchema: entry.definition.inputSchema ?? null,
       logicalPath: source.logicalPath,

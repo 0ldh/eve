@@ -1,37 +1,43 @@
 ---
 title: "CLI"
-description: "Reference for every eve CLI command: init, set, info, build, start, dev, logs, trace, link, deploy, eval, channels, and extension."
+description: "Reference for every eve CLI command: init, set, info, build, start, dev, logs, traces, link, deploy, eval, channels, extension, and telemetry."
 ---
 
 Relevant `eve` commands can run from the application root or any directory beneath it. Running `eve` with no command runs `eve init` when the current directory is not an eve project, or `eve dev` when it is.
 
 ## Commands
 
-| Command                       | Description                                                                                                                        |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `eve`                         | Initialize the current directory, or start development when it is already an eve project                                           |
-| `eve init [target]`           | Create a new agent, or add an agent to an existing project                                                                         |
-| `eve info`                    | Print the resolved application, including static instructions and discovered capabilities, routes, artifact paths, and diagnostics |
-| `eve build`                   | Compile `.eve/` artifacts and build the host output; prints the output directory                                                   |
-| `eve start`                   | Serve the built `.output/` app; prints the listening URL                                                                           |
-| `eve dev`                     | Start the local dev server and open the terminal UI                                                                                |
-| `eve dev <url>`               | Connect the UI to an existing server URL (e.g. a remote deployment) instead of booting a local server                              |
-| `eve acp [url]`               | Serve the local application or an existing eve server URL as a stable ACP v1 agent over stdio                                      |
-| `eve logs [logid]`            | Print an `eve dev` diagnostic log (the most recent when `logid` is omitted)                                                        |
-| `eve logs ls`                 | List `eve dev` diagnostic logs, most recent first                                                                                  |
-| `eve traces ls`               | List locally captured agent traces, most recent first                                                                              |
-| `eve traces [trace]`          | Show a local span tree (the most recent when omitted)                                                                              |
-| `eve link`                    | Link the directory to a Vercel project and pull AI Gateway credentials                                                             |
-| `eve deploy`                  | Deploy the agent to Vercel production (links first if needed)                                                                      |
-| `eve eval`                    | Run evals against the local app or a remote target                                                                                 |
-| `eve channels list`           | List user-authored channels                                                                                                        |
-| `eve extension init [target]` | Create a new extension package                                                                                                     |
-| `eve extension build`         | Build the current package as an extension                                                                                          |
-| `eve set`                     | Change the root agent's model and reasoning effort                                                                                 |
-| `eve add <item>`              | Install an item from the official or a configured shadcn registry                                                                  |
-| `eve registry <command>`      | Add sources and list, search, or view registry catalog items                                                                       |
+| Command                        | Description                                                                                                                        |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `eve`                          | Initialize the current directory, or start development when it is already an eve project                                           |
+| `eve init [target]`            | Create a new agent, or add an agent to an existing project                                                                         |
+| `eve info`                     | Print the resolved application, including static instructions and discovered capabilities, routes, artifact paths, and diagnostics |
+| `eve build`                    | Compile `.eve/` artifacts and build the host output; prints the output directory                                                   |
+| `eve start`                    | Serve the built `.output/` app; prints the listening URL                                                                           |
+| `eve dev`                      | Start the local dev server and open the terminal UI                                                                                |
+| `eve dev <url>`                | Connect the UI to an existing server URL (e.g. a remote deployment) instead of booting a local server                              |
+| `eve acp [url]`                | Serve the local application or an existing eve server URL as a stable ACP v1 agent over stdio                                      |
+| `eve logs [logid]`             | Print an `eve dev` diagnostic log (the most recent when `logid` is omitted)                                                        |
+| `eve logs ls`                  | List `eve dev` diagnostic logs, most recent first                                                                                  |
+| `eve traces ls`                | List locally captured agent traces, most recent first                                                                              |
+| `eve traces [trace]`           | Show a local span tree (the most recent when omitted)                                                                              |
+| `eve telemetry <command>`      | Show, enable, or disable CLI telemetry collection                                                                                  |
+| `eve link`                     | Link the directory to a Vercel project and pull AI Gateway credentials                                                             |
+| `eve deploy`                   | Deploy the agent to Vercel production (links first if needed)                                                                      |
+| `eve eval`                     | Run evals against the local app or a remote target                                                                                 |
+| `eve channels list`            | List user-authored channels                                                                                                        |
+| `eve extension init [target]`  | Create a new extension package                                                                                                     |
+| `eve extension build`          | Build the current package as an extension                                                                                          |
+| `eve set`                      | Change the root agent's model and reasoning effort                                                                                 |
+| `eve add <item>`               | Install an item from the official or a configured shadcn registry                                                                  |
+| `eve integration setup <kind>` | Run a built-in setup flow directly after its registry files are installed                                                          |
+| `eve registry <command>`       | Add sources and list, search, or view registry catalog items                                                                       |
 
 When `eve build` fails on discovery errors, it prints the full diagnostics report (severity, message, source path) and the diagnostics artifact path.
+
+## CLI telemetry
+
+eve collects CLI telemetry by default to improve the command-line interface. Run `eve telemetry disable` to disable it for this machine, or set `EVE_TELEMETRY_DISABLED=1` for one command. See [CLI telemetry](./telemetry) for the current data fields, exclusions, debug mode, notice, and local preference storage.
 
 ## `eve init`
 
@@ -155,6 +161,10 @@ eve build [--profile <path>] [--skip-sandbox-prewarm]
 
 Compiles and bundles in an invocation-owned directory under `.eve/builds/`, then publishes the completed host output and prints its path. Scratch workspaces are removed after success or failure.
 
+Authored bundles preserve custom Node.js resolution conditions supplied through `--conditions`,
+`-C`, or `NODE_OPTIONS`. For example, `NODE_OPTIONS="--conditions=react-server" eve build`
+keeps a channel's `server-only` imports on the same export used during compilation.
+
 | Flag                     | Type   | Default | Description                                                                                   |
 | ------------------------ | ------ | ------- | --------------------------------------------------------------------------------------------- |
 | `--profile <path>`       | string | off     | Best-effort versioned JSON report with build-phase timings and final output-size measurements |
@@ -193,6 +203,8 @@ eve start [--host <host>] [--port <port>]
 
 Serves the previously built output. Prints the listening URL.
 
+For self-hosted deployments, copy the app source, `.output/`, and installed dependencies together. The deployment directory can differ from the build directory. Preserve the relative layout of any workspace packages used by the app; startup resolves sandbox prewarm modules from the deployed source.
+
 ## `eve dev`
 
 ```bash
@@ -210,7 +222,7 @@ Pass a bare URL and the UI connects to that server instead of booting a local on
 | `-H, --header <header>`             | string | none               | Request header for a URL target, in `Name: value` form; repeat for multiple headers       |
 | `--no-ui`                           | flag   | UI on              | Start the server without an interactive UI                                                |
 | `--name <name>`                     | string | app folder name    | Title shown in the terminal UI                                                            |
-| `--input <text>`                    | string | none               | Pre-fill the prompt input; bare local `/model` starts onboarding                          |
+| `--input <text>`                    | string | none               | Pre-fill the prompt input                                                                 |
 | `--tools <mode>`                    | enum   | `auto-collapsed`   | Tool-call rendering: `full` \| `collapsed` \| `auto-collapsed` \| `hidden`                |
 | `--reasoning <mode>`                | enum   | `full`             | Reasoning rendering: `full` \| `collapsed` \| `auto-collapsed` \| `hidden`                |
 | `--subagents <mode>`                | enum   | `auto-collapsed`   | Subagent-section rendering: `full` \| `collapsed` \| `auto-collapsed` \| `hidden`         |
@@ -221,7 +233,7 @@ Pass a bare URL and the UI connects to that server instead of booting a local on
 
 `eve acp` reserves stdin and stdout for newline-delimited JSON-RPC and sends diagnostics to stderr. Without a URL, it supervises an isolated local development server. With a URL, it bridges ACP to that server's existing eve HTTP API and accepts the same URL credentials and request headers as `eve dev <url>`. Pass `--scope <team>` when the active Vercel scope does not own the deployment; `EVE_VERCEL_SCOPE` provides the same value for managed harnesses. See [Agent Client Protocol (ACP)](../protocols/acp) for client configuration and capability limits.
 
-A fresh `eve init` passes `--input /model`. That bare local input starts onboarding: the TUI installs the Vercel CLI if needed, asks you to log in if needed, opens `/model`, then offers categorized registry next steps before the first prompt. Other input stays editable in the prompt.
+A fresh `eve init` starts onboarding before the first prompt: the TUI installs the Vercel CLI if needed, asks you to log in if needed, guides you through model configuration, then lets you choose channels and integrations. Other `--input` text stays editable in the prompt.
 
 For a URL target protected by HTTP Basic auth, put the credentials in the URL. eve sends them as a Basic `Authorization` header and strips them from the server URL before connecting:
 

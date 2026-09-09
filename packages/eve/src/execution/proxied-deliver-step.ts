@@ -1,3 +1,4 @@
+import type { SessionInboxAddress } from "#execution/wire/session-inbox-contract.js";
 import type { DeliverHookPayload, DeliverPayload, SessionAuthContext } from "#channel/types.js";
 import { coalesceDeliverPayloads } from "#execution/deliver-payloads.js";
 import {
@@ -5,9 +6,11 @@ import {
   readDurableSession,
   replaceDurableSessionSnapshot,
 } from "#execution/durable-session-store.js";
-import { routeDeliverPayload } from "#execution/subagent-hitl-proxy.js";
+import { routeDeliverPayload } from "#subagents/hitl-proxy.js";
 import { sendTaskInboundPayload } from "#execution/tasks/parent/run-parent.js";
 import { resumeSessionInbox } from "#execution/wire/session-inbox-resume.js";
+import { resumeWorkflowToolRunAnswers } from "#execution/tools/workflow/answer.js";
+import type { AnswerHookRoute } from "#harness/proxy-input-requests.js";
 import type { InputResponse } from "#shared/input.js";
 import { findSessionTaskEntry } from "#tasks/session-index.js";
 import {
@@ -42,7 +45,9 @@ type LegacyRoutedDeliverResult =
     };
 
 interface ChildBucket {
+  readonly answerHook?: AnswerHookRoute;
   readonly childContinuationToken: string;
+  readonly childSessionInbox?: SessionInboxAddress;
   readonly childResponseUrl?: string;
   readonly metadata: NonNullable<DeliverHookPayload["deliveryMetadata"]>[number][];
   readonly payloads: DeliverPayload[];
@@ -105,16 +110,16 @@ export async function routeProxiedDeliverStep(
     if (routed.forSelf !== undefined) parentPayloads.set(sourcePayloadIndex, routed.forSelf);
 
     for (const [childIndex, forChild] of routed.forChildren.entries()) {
-      const key =
-        forChild.taskId === undefined
-          ? forChild.childContinuationToken
-          : [
-              forChild.childContinuationToken,
-              forChild.childResponseUrl ?? "",
-              forChild.taskId,
-            ].join("\0");
+      const key = [
+        forChild.childContinuationToken,
+        forChild.childSessionInbox?.sessionId ?? "",
+        forChild.childResponseUrl ?? "",
+        forChild.taskId ?? "",
+      ].join("\0");
       const child = children.get(key) ?? {
+        answerHook: forChild.answerHook,
         childContinuationToken: forChild.childContinuationToken,
+        childSessionInbox: forChild.childSessionInbox,
         childResponseUrl: forChild.childResponseUrl,
         metadata: [],
         payloads: [],
@@ -139,10 +144,9 @@ export async function routeProxiedDeliverStep(
 
   let retired = false;
   for (const child of children.values()) {
-    // Task-owned children are addressed through their run, never
-    // directly: the run must forward and clear the batch under one
-    // durable decision, or a late answer could unblock a question the
-    // child raised after this one.
+    // A task-owned executor is addressed through its task controller. The
+    // controller forwards the answer and clears `input_required` as one
+    // durable decision, so its view cannot claim the child resumed first.
     const taskId = child.taskId;
     if (taskId !== undefined) {
       const entry = findSessionTaskEntry(durableSession.state, taskId);
@@ -155,6 +159,7 @@ export async function routeProxiedDeliverStep(
         payload: {
           auth: sourceDelivery.auth,
           childContinuationToken: child.childContinuationToken,
+          childSessionInbox: child.childSessionInbox,
           childResponseUrl: child.childResponseUrl,
           inputResponses: coalesceDeliverPayloads(child.payloads).inputResponses ?? [],
           kind: "input-response",
@@ -165,9 +170,16 @@ export async function routeProxiedDeliverStep(
         mergeStrandedResponses(parentPayloads, child, taskId);
         continue;
       }
-      // Hand-off to the task run succeeded. Retire the parent-visible
-      // routes so a later click cannot re-enter the same batch after the
-      // run has already accepted (or no-op'd) this answer.
+      durableSession = retireProxyInputRequests(durableSession, child.retireRequestIds);
+      retired = true;
+      continue;
+    }
+
+    if (child.answerHook !== undefined) {
+      await resumeWorkflowToolRunAnswers(
+        child.childContinuationToken,
+        coalesceDeliverPayloads(child.payloads).inputResponses,
+      );
       durableSession = retireProxyInputRequests(durableSession, child.retireRequestIds);
       retired = true;
       continue;
@@ -178,7 +190,10 @@ export async function routeProxiedDeliverStep(
       deliveryMetadata: child.metadata.length === 0 ? undefined : child.metadata,
       payloads: child.payloads,
     };
-    await resumeSessionInbox(child.childContinuationToken, childDelivery);
+    await resumeSessionInbox(
+      child.childSessionInbox ?? child.childContinuationToken,
+      childDelivery,
+    );
     // Successfully forwarded request IDs are retired so later deliveries
     // cannot route through stale entries.
     durableSession = retireProxyInputRequests(durableSession, child.retireRequestIds);

@@ -1,3 +1,5 @@
+import { isWorkflowToolDefinition } from "#tools/workflow-definition.js";
+import { readWorkflowFunctionId } from "#internal/workflow/reference.js";
 import { isDisabledToolSentinel } from "#tools/definition.js";
 import { isExperimentalWorkflowToolDefinition } from "#tools/workflow.js";
 import { isWebSearchToolDefinition } from "#tools/provided/web-search.js";
@@ -8,7 +10,8 @@ import {
   expectPositiveInteger,
   expectString,
 } from "#internal/authored-module.js";
-import type { InternalToolDefinitionWithExecuteFn } from "#tools/definition.js";
+import type { InternalToolDefinition, ToolExecuteFn } from "#tools/definition.js";
+import { readToolBehavior, type CompiledToolBehavior } from "#tools/behavior.js";
 import {
   serializeInputSchema,
   serializeOutputSchema,
@@ -29,8 +32,11 @@ import {
  * the compiled entry. This shape never carries an authored `name`.
  */
 type NormalizedAuthoredTool = Readonly<
-  Omit<InternalToolDefinitionWithExecuteFn, "name"> & {
+  Omit<InternalToolDefinition, "name"> & {
+    readonly behavior?: CompiledToolBehavior;
+    readonly execute?: ToolExecuteFn;
     readonly hasApproval: boolean;
+    readonly hasExecute: boolean;
     readonly hasModelOutputProjection: boolean;
   }
 >;
@@ -97,15 +103,29 @@ export function normalizeToolDefinition(value: unknown, message: string): Normal
   }
 
   const record = expectObjectRecord(value, message);
+  const workflowId = readWorkflowFunctionId(record.execute);
+  if (isWorkflowToolDefinition(value)) {
+    if (workflowId === undefined) {
+      throw new Error(
+        `${message} defineWorkflowTool() requires a compiled workflow executor. Start execute with "use workflow" and export defineWorkflowTool() as the default export of a static tool module.`,
+      );
+    }
+  } else if (workflowId !== undefined) {
+    throw new Error(
+      `${message} Workflow executors require defineWorkflowTool() from "eve/tools". Replace defineTool() or the bare tool object with defineWorkflowTool().`,
+    );
+  }
   expectOnlyKnownKeys(
     record,
     [
+      "label",
       "auth",
       "description",
       "execute",
       "execution",
       "inputSchema",
       "approval",
+      "approvalKey",
       "outputSchema",
       "toModelOutput",
     ],
@@ -116,14 +136,32 @@ export function normalizeToolDefinition(value: unknown, message: string): Normal
       ? null
       : serializeInputSchema(record.inputSchema as ToolSchemaSource);
   const outputSchema = serializeOutputSchema(record.outputSchema as ToolSchemaSource | undefined);
+  const behavior = readToolBehavior(value);
+  const hasExecute = record.execute !== undefined;
+  if (
+    !hasExecute &&
+    behavior?.handling?.kind !== "dispatch" &&
+    behavior?.handling?.kind !== "request-input"
+  ) {
+    expectFunction(record.execute, message);
+  }
   const definition: MutableNormalizedAuthoredTool = {
     description: expectString(record.description, message),
-    execute: expectFunction(record.execute, message),
     hasApproval: record.approval !== undefined,
+    hasExecute,
     hasModelOutputProjection: record.toModelOutput !== undefined,
     inputSchema,
   };
+  if (behavior !== undefined) {
+    definition.behavior = behavior;
+  }
+  if (hasExecute) {
+    definition.execute = expectFunction(record.execute, message) as ToolExecuteFn;
+  }
   if (record.execution !== undefined) {
+    if (!hasExecute) {
+      throw new Error(`${message} Execute-less native tools cannot use background execution.`);
+    }
     const execution = expectString(record.execution, message);
     if (execution !== "background") {
       throw new Error(`${message} Expected "execution" to be "background".`);
@@ -140,8 +178,20 @@ export function normalizeToolDefinition(value: unknown, message: string): Normal
    * references are captured later by `resolve-agent.ts` when it materializes
    * the module export and attaches them to the ResolvedToolDefinition.
    */
+  if (record.label !== undefined) {
+    const label = expectObjectRecord(record.label, message);
+    expectOnlyKnownKeys(label, ["start", "complete", "delta"], message);
+    expectFunction(label.start, message);
+    if (label.complete !== undefined) expectFunction(label.complete, message);
+    if (label.delta !== undefined) expectFunction(label.delta, message);
+  }
+
   if (record.approval !== undefined) {
     normalizeApproval(record.approval, message);
+  }
+
+  if (record.approvalKey !== undefined) {
+    expectFunction(record.approvalKey, message);
   }
 
   if (record.toModelOutput !== undefined) {

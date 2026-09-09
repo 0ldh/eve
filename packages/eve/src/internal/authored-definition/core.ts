@@ -6,6 +6,7 @@ import type {
 import type { ScheduleDefinition, ScheduleRunHandler } from "#public/definitions/schedule.js";
 import type { SkillDefinition, SkillFileContent } from "#public/definitions/skill.js";
 import {
+  expectBoolean,
   expectFunction,
   expectObjectRecord,
   expectOnlyKnownKeys,
@@ -48,6 +49,7 @@ export function normalizeAgentDefinition(
     [
       "build",
       "compaction",
+      "defaultTools",
       "description",
       "experimental",
       "limits",
@@ -78,6 +80,10 @@ export function normalizeAgentDefinition(
 
   if (record.description !== undefined) {
     definition.description = expectString(record.description, message);
+  }
+
+  if (record.defaultTools !== undefined) {
+    definition.defaultTools = expectBoolean(record.defaultTools, message);
   }
 
   if (record.compaction !== undefined) {
@@ -172,6 +178,16 @@ function expectPositiveIntegerOrFalse(value: unknown, message: string): number |
   return expectPositiveInteger(value, message);
 }
 
+function expectPositiveNumberOrFalse(value: unknown, message: string): number | false {
+  if (value === false) {
+    return false;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(message);
+  }
+  return value;
+}
+
 function normalizeAgentLimitsDefinition(
   value: unknown,
   message: string,
@@ -179,7 +195,12 @@ function normalizeAgentLimitsDefinition(
   const record = expectObjectRecord(value, message);
   expectOnlyKnownKeys(
     record,
-    ["maxInputTokensPerSession", "maxOutputTokensPerSession", "sessionTimeoutMs"],
+    [
+      "maxInputTokensPerSession",
+      "maxOutputTokensPerSession",
+      "maxTokenCostUsdPerSession",
+      "sessionTimeoutMs",
+    ],
     message,
   );
   const normalizedDefinition: Mutable<NonNullable<NormalizedAgentDefinition["limits"]>> = {};
@@ -199,6 +220,12 @@ function normalizeAgentLimitsDefinition(
   if (record.maxOutputTokensPerSession !== undefined) {
     normalizedDefinition.maxOutputTokensPerSession = expectPositiveIntegerOrFalse(
       record.maxOutputTokensPerSession,
+      message,
+    );
+  }
+  if (record.maxTokenCostUsdPerSession !== undefined) {
+    normalizedDefinition.maxTokenCostUsdPerSession = expectPositiveNumberOrFalse(
+      record.maxTokenCostUsdPerSession,
       message,
     );
   }
@@ -258,7 +285,7 @@ function normalizeAgentExperimentalDefinition(
   message: string,
 ): NonNullable<NormalizedAgentDefinition["experimental"]> {
   const record = expectObjectRecord(value, message);
-  expectOnlyKnownKeys(record, ["instrumentationProviders", "tasks", "workflow"], message);
+  expectOnlyKnownKeys(record, ["instrumentationProviders", "workflow"], message);
   const normalizedDefinition: Mutable<NonNullable<NormalizedAgentDefinition["experimental"]>> = {};
 
   if (record.instrumentationProviders !== undefined) {
@@ -266,13 +293,6 @@ function normalizeAgentExperimentalDefinition(
       throw new Error(`${message} "experimental.instrumentationProviders" must be a boolean.`);
     }
     normalizedDefinition.instrumentationProviders = record.instrumentationProviders;
-  }
-
-  if (record.tasks !== undefined) {
-    if (typeof record.tasks !== "boolean") {
-      throw new Error(`${message} "experimental.tasks" must be a boolean.`);
-    }
-    normalizedDefinition.tasks = record.tasks;
   }
 
   if (record.workflow !== undefined) {

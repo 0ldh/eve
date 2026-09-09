@@ -14,7 +14,7 @@ import { contextStorage } from "#context/container.js";
 import { SessionTraceSeedKey } from "#context/keys.js";
 import { withoutInstrumentationContent } from "#instrumentation/content.js";
 import { instrumentationEventForTraceDecision } from "#instrumentation/content-policy.js";
-import type { AgentTraceStateStore, AgentTurnTraceState } from "#tracing/agent-trace-state.js";
+import type { AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import {
   contentAttribute,
   genAiInputMessagesAttribute,
@@ -30,12 +30,22 @@ import { createAgentActionInstrumentation } from "#tracing/agent-action-instrume
 import { createAgentApprovalInstrumentation } from "#tracing/agent-approval-instrumentation.js";
 import { createAgentChannelDeliveryInstrumentation } from "#tracing/agent-channel-delivery-instrumentation.js";
 import { createAgentToolInstrumentation } from "#tracing/agent-tool-instrumentation.js";
+import { agentSpanNamingAttributes } from "#tracing/agent-span-naming.js";
 import { markAgentTraceContext } from "#tracing/agent-trace-context.js";
 import { runtimeContextAttributes } from "#tracing/agent-otel-runtime-context.js";
-import { setAgentUsage } from "#tracing/agent-otel-usage.js";
+import {
+  readGatewayCost,
+  setAgentInvocationUsage,
+  setAgentUsage,
+} from "#tracing/agent-otel-usage.js";
 import { createAgentOtelSessionContext } from "#tracing/agent-otel-session-context.js";
 import type { TraceCapturePolicy } from "#tracing/otel-declaration.js";
 import { isSampledTrace, resolveTracePolicyDecision } from "#tracing/sampled-trace.js";
+import {
+  applyLiveDeliveryAudienceCeiling,
+  resolveForwardedTraceSeed,
+} from "#shared/forwarded-trace-policy.js";
+import { readInstrumentationDecision } from "#shared/instrumentation-decision.js";
 import { withChannelAudience } from "#tracing/channel-audience-context.js";
 import { suppressTracing } from "#tracing/suppress-tracing.js";
 import { normalizeChannelAudience, type ChannelAudience } from "#shared/channel-audience.js";
@@ -143,10 +153,15 @@ export function createAgentOtelInstrumentation(
     const audience = audienceForEvent(event, session?.channelAudience);
     const eventSeed = "traceSeed" in event ? event.traceSeed : undefined;
     const contextSeed = contextStorage.getStore()?.get(SessionTraceSeedKey);
+    const contextTraceState = resolveForwardedTraceSeed(contextSeed);
+    const eventTraceState = resolveForwardedTraceSeed(
+      eventSeed,
+      contextTraceState?.forwardedTracePolicy,
+    );
     const decision =
-      eventSeed?.decision ??
-      contextSeed?.decision ??
-      session?.decision ??
+      eventTraceState?.decision ??
+      contextTraceState?.decision ??
+      readInstrumentationDecision(session?.decision) ??
       (eventSeed !== undefined
         ? resolveTracePolicyDecision(isSampledTrace(eventSeed), audience)
         : contextSeed !== undefined
@@ -155,16 +170,32 @@ export function createAgentOtelInstrumentation(
             ? resolveTracePolicyDecision(isSampledTrace(session.context), audience)
             : undefined);
     if (decision === undefined) return withoutInstrumentationContent(event);
-    return instrumentationEventForTraceDecision(
-      event,
-      decision.action === "drop"
-        ? decision
+    const normalizedEvent =
+      eventTraceState === undefined || !("traceSeed" in event) || event.traceSeed === undefined
+        ? event
         : {
-            action: "record",
-            recordInputs: recordInputs && decision.recordInputs,
-            recordOutputs: recordOutputs && decision.recordOutputs,
-          },
+            ...event,
+            traceSeed: {
+              ...event.traceSeed,
+              decision: eventTraceState.decision,
+              traceFlags: eventTraceState.traceFlags,
+            },
+          };
+    return instrumentationEventForTraceDecision(
+      normalizedEvent,
+      applyLiveDeliveryAudienceCeiling(
+        decision.action === "drop"
+          ? decision
+          : {
+              action: "record",
+              recordInputs: recordInputs && decision.recordInputs,
+              recordOutputs: recordOutputs && decision.recordOutputs,
+            },
+        audience,
+        eventTraceState?.forwardedTracePolicy ?? contextTraceState?.forwardedTracePolicy,
+      ),
       audience,
+      { applyAudienceCeiling: false },
     );
   };
 
@@ -198,6 +229,7 @@ export function createAgentOtelInstrumentation(
               "agent.step.index": event.scope.stepIndex,
               "agent.turn.id": event.scope.turnId,
               "agent.name": event.scope.functionId,
+              ...agentSpanNamingAttributes("agent.step"),
               ...runtimeContextAttributes(event.runtimeContext),
             },
             links:
@@ -233,8 +265,6 @@ export function createAgentOtelInstrumentation(
     attemptScopes.delete(event.scope.attemptId);
     const attempt = steps.get(scope);
     if (attempt === undefined) return;
-    // The span event drops the `attempt` segment: this span *is* one attempt,
-    // and `agent.step.attempt` on it already says which.
     attempt.span.addEvent(
       event.type === "step.attempt.completed" ? "step.completed" : "step.failed",
     );
@@ -261,6 +291,12 @@ export function createAgentOtelInstrumentation(
   const onSessionTransition = async (
     event: InstrumentationSessionTransitionEvent,
   ): Promise<void> => {
+    if (event.type === "session.failed" && event.turnId !== undefined) {
+      await input.stateStore.updateTurn(event.sessionId, event.turnId, (turn) => ({
+        ...turn,
+        terminal: turn.terminal ?? { error: event.error, type: "turn.failed" },
+      }));
+    }
     if (event.turnId !== undefined) {
       const turn = await input.stateStore.getTurn(event.sessionId, event.turnId);
       if (turn !== undefined) {
@@ -282,21 +318,33 @@ export function createAgentOtelInstrumentation(
                   "gen_ai.agent.name": agentName,
                   "gen_ai.conversation.id": event.sessionId,
                   "gen_ai.operation.name": "invoke_agent",
+                  ...agentSpanNamingAttributes(agentSpanName(agentName), "invoke_agent"),
                 },
                 kind: SpanKind.INTERNAL,
                 startTime: turn.startTimeMs,
               },
-              contextFromSpanContext({
-                isRemote: turn.parentIsRemote ?? false,
-                spanId: turn.parentSpanId,
-                traceFlags: turn.context.traceFlags,
-                traceId: turn.context.traceId,
-              }),
+              withChannelAudience(
+                contextFromSpanContext({
+                  isRemote: turn.parentIsRemote ?? false,
+                  spanId: turn.parentSpanId,
+                  traceFlags: turn.context.traceFlags,
+                  traceId: turn.context.traceId,
+                }),
+                session?.channelAudience,
+              ),
             ),
           );
           setAgentInvocationUsage(span, turn.modelUsage);
           span.addEvent("turn.started", undefined, turn.startTimeMs);
           if (turn.terminal !== undefined) {
+            span.setAttribute(
+              "agent.turn.outcome",
+              turn.terminal.type === "turn.completed"
+                ? "completed"
+                : turn.terminal.type === "turn.cancelled"
+                  ? "cancelled"
+                  : "failed",
+            );
             span.addEvent(turn.terminal.type);
             if (turn.terminal.type === "turn.failed") {
               recordError(span, turn.terminal.error);
@@ -329,6 +377,7 @@ export function createAgentOtelInstrumentation(
           "gen_ai.operation.name": "chat",
           "gen_ai.provider.name": event.model.provider,
           "gen_ai.request.model": event.model.modelId,
+          ...agentSpanNamingAttributes(modelSpanName(event.model.modelId), "chat"),
           ...runtimeContextAttributes(event.runtimeContext),
         },
       },
@@ -599,59 +648,12 @@ function contextFromSpanContext(spanContext: SpanContext): Context {
   return trace.setSpan(ROOT_CONTEXT, trace.wrapSpanContext(spanContext));
 }
 
-/**
- * Extracts cost data from a step result's provider metadata. Only Vercel AI
- * Gateway reports it (`providerMetadata.gateway`): raw inference cost, the
- * gateway's surcharged total, the input/output split, and the generation id
- * for dashboard reconciliation. Values arrive as USD strings; anything
- * missing or non-numeric is skipped, so non-gateway providers get nothing.
- */
-function readGatewayCost(
-  providerMetadata: Readonly<Record<string, unknown>>,
-): Record<string, string | number> | undefined {
-  const gateway = providerMetadata.gateway;
-  if (!isRecord(gateway)) return undefined;
-  const attributes: Record<string, string | number> = {};
-  const cost = readUsd(gateway.cost);
-  if (cost !== undefined) attributes["gen_ai.usage.cost"] = cost;
-  const gatewayCost = readUsd(gateway.gatewayCost);
-  if (gatewayCost !== undefined) attributes["gen_ai.usage.gateway_cost"] = gatewayCost;
-  const inputCost = readUsd(gateway.inputInferenceCost);
-  if (inputCost !== undefined) attributes["gen_ai.usage.input_cost"] = inputCost;
-  const outputCost = readUsd(gateway.outputInferenceCost);
-  if (outputCost !== undefined) attributes["gen_ai.usage.output_cost"] = outputCost;
-  if (typeof gateway.generationId === "string" && gateway.generationId.length > 0) {
-    attributes["gen_ai.generation.id"] = gateway.generationId;
-  }
-  return Object.keys(attributes).length === 0 ? undefined : attributes;
-}
-
-function readUsd(value: unknown): number | undefined {
-  if (typeof value !== "string") return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function modelSpanName(modelId: string): string {
   return `chat ${modelId}`;
 }
 
 function agentSpanName(agentName: string | undefined): string {
   return agentName === undefined ? "invoke_agent" : `invoke_agent ${agentName}`;
-}
-
-function setAgentInvocationUsage(span: Span, modelUsage: AgentTurnTraceState["modelUsage"]): void {
-  if (modelUsage === undefined) return;
-  if (modelUsage.inputTokens !== undefined) {
-    span.setAttribute("gen_ai.usage.input_tokens", modelUsage.inputTokens);
-  }
-  if (modelUsage.outputTokens !== undefined) {
-    span.setAttribute("gen_ai.usage.output_tokens", modelUsage.outputTokens);
-  }
 }
 
 function errorText(error: unknown): unknown {

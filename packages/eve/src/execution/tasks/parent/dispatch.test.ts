@@ -1,440 +1,268 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getDynamicSubagentSelection } from "#context/dynamic-subagent-lifecycle.js";
-import { deserializeContext } from "#context/serialize.js";
-import type { RuntimeSession } from "#execution/agent-handle-dispatch.js";
-import {
-  cancelRemoteAgentTurn,
-  resolveRemoteAgentForAction,
-  resolveRemoteAgentStreamHeaders,
-} from "#execution/remote-agent-dispatch.js";
-import { executeTaskControlAction } from "#execution/tasks/parent/dispatch.js";
+import { cancelOwnedTask, executeTaskControlAction } from "#execution/tasks/parent/dispatch.js";
 import { readLatestTaskView, sendTaskCommand } from "#execution/tasks/parent/run-parent.js";
-import { requestWorkflowTurnCancellation } from "#execution/workflow-runtime.js";
-import { AGENT_HANDLES_STATE_KEY } from "#harness/handles/store.js";
-import type { RuntimeToolCallActionRequest } from "#shared/action-types.js";
-import type { CompiledBundle } from "#runtime/sessions/runtime-context-keys.js";
-import { SESSION_TASKS_STATE_KEY } from "#tasks/session-index.js";
+import { cancelWorkflowToolRun } from "#execution/tools/workflow/cancel.js";
+import { resumeSessionInbox } from "#execution/wire/session-inbox-resume.js";
+
+const { cancelRun, getRun } = vi.hoisted(() => ({
+  cancelRun: vi.fn(),
+  getRun: vi.fn(),
+}));
 
 vi.mock("#execution/tasks/parent/run-parent.js", () => ({
   readLatestTaskView: vi.fn(),
   sendTaskCommand: vi.fn(),
 }));
-vi.mock("#context/serialize.js", () => ({ deserializeContext: vi.fn() }));
-vi.mock("#context/dynamic-subagent-lifecycle.js", () => ({
-  getDynamicSubagentSelection: vi.fn(),
-}));
-vi.mock("#execution/workflow-runtime.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("#execution/workflow-runtime.js")>()),
-  requestWorkflowTurnCancellation: vi.fn(),
-}));
-vi.mock("#execution/remote-agent-dispatch.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("#execution/remote-agent-dispatch.js")>()),
-  cancelRemoteAgentTurn: vi.fn(),
-  resolveRemoteAgentForAction: vi.fn(),
-  resolveRemoteAgentStreamHeaders: vi.fn(),
+vi.mock("#execution/tools/workflow/cancel.js", () => ({ cancelWorkflowToolRun: vi.fn() }));
+vi.mock("#execution/wire/session-inbox-resume.js", () => ({ resumeSessionInbox: vi.fn() }));
+vi.mock("#internal/workflow/runtime.js", () => ({
+  cancelRun,
+  getRun,
+  getWorld: vi.fn(() => ({})),
 }));
 
-const action: RuntimeToolCallActionRequest = {
-  callId: "call-cancel",
-  input: { taskIds: ["task-1"] },
-  kind: "tool-call",
-  toolName: "task_cancel",
-};
+const entry = {
+  createdByTurnId: "turn-1",
+  executor: { data: { hookToken: "run-hook", runId: "run-1" }, kind: "workflow-tool" },
+  metadata: { kind: "tool", name: "export" },
+  taskId: "task-1",
+  taskInboxToken: "task-token",
+  taskRunId: "task-run",
+} as const;
 
-function createSession(mode: "local" | "remote"): RuntimeSession {
-  const address =
-    mode === "local"
-      ? { continuationToken: "child-token", kind: "agent/local" as const, sessionId: "child-1" }
-      : {
-          callbackBaseUrl: "https://parent.example",
-          kind: "agent/remote" as const,
-          sessionId: "child-1",
-          url: "https://child.example",
-        };
-  return {
-    agent: { modelReference: { id: "model" }, system: "", tools: [] },
-    compaction: { recentWindowSize: 4, threshold: 1_000_000 },
-    continuationToken: "parent-token",
-    history: [],
-    sessionId: "parent-session",
-    state: {
-      [AGENT_HANDLES_STATE_KEY]: {
-        handles: [
-          {
-            address,
-            identity: { id: "agent-1", name: "research", nodeId: "node-1" },
-            phase: "addressed",
-          },
-        ],
-      },
-      [SESSION_TASKS_STATE_KEY]: {
-        tasks: [
-          {
-            taskInboxToken: "task-token",
-            createdByTurnId: "turn-1",
-            metadata: {
-              agentId: "agent-1",
-              kind: "subagent",
-              mode,
-              name: "research",
-            },
-            operationId: "operation-1",
-            taskId: "task-1",
-            taskRunId: "run-1",
-          },
-        ],
-      },
-    },
-  } as RuntimeSession;
-}
-
-describe("task cancellation identity", () => {
+describe("task cancellation", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.useFakeTimers();
     vi.mocked(sendTaskCommand).mockResolvedValue("delivered");
+    getRun.mockReturnValue({ status: Promise.resolve("completed") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("cancels task-owned work after cancellation commits", async () => {
     vi.mocked(readLatestTaskView).mockResolvedValue({
-      metadata: {
-        agentId: "agent-1",
-        kind: "subagent",
-        mode: "local",
-        name: "research",
-      },
-      executor: { childSessionId: "child-1", childTurnId: "turn_child_7" },
+      executor: { binding: entry.executor },
+      metadata: entry.metadata,
       status: "cancelled",
-      taskId: "task-1",
+      taskId: entry.taskId,
     });
-    vi.mocked(resolveRemoteAgentForAction).mockReturnValue({ name: "research" } as never);
-    vi.mocked(requestWorkflowTurnCancellation).mockResolvedValue({
-      sessionId: "child-1",
-      status: "accepted",
+    const cancelled = cancelOwnedTask({ entry });
+    await vi.runAllTimersAsync();
+    await cancelled;
+    expect(sendTaskCommand).toHaveBeenNthCalledWith(1, {
+      command: { kind: "cancel" },
+      taskInboxToken: "task-token",
     });
-    vi.mocked(cancelRemoteAgentTurn).mockResolvedValue({
-      sessionId: "child-1",
-      status: "accepted",
-    });
-    vi.mocked(resolveRemoteAgentStreamHeaders).mockResolvedValue({ authorization: "Bearer fresh" });
-    vi.mocked(deserializeContext).mockResolvedValue("context" as never);
-    vi.mocked(getDynamicSubagentSelection).mockReturnValue(undefined);
+    expect(cancelWorkflowToolRun).toHaveBeenCalledWith(
+      { hookToken: "run-hook", runId: "run-1" },
+      "Task task-1 was cancelled.",
+    );
+    expect(cancelRun).not.toHaveBeenCalled();
+    expect(resumeSessionInbox).not.toHaveBeenCalled();
   });
 
-  it.each(["local", "remote"] as const)(
-    "guards %s cancellation with the task's child turn",
-    async (mode) => {
-      const result = await executeTaskControlAction({
-        action,
-        bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-        parentTurnId: "turn-parent",
-        session: createSession(mode),
-      });
-
-      if (mode === "local") {
-        expect(requestWorkflowTurnCancellation).toHaveBeenCalledWith({
-          sessionId: "child-1",
-          taskId: "task-1",
-          turnId: "turn_child_7",
-        });
-        expect(cancelRemoteAgentTurn).not.toHaveBeenCalled();
-      } else {
-        expect(cancelRemoteAgentTurn).toHaveBeenCalledWith(
-          expect.objectContaining({
-            sessionId: "child-1",
-            taskId: "task-1",
-            turnId: "turn_child_7",
-          }),
-        );
-        expect(requestWorkflowTurnCancellation).not.toHaveBeenCalled();
-      }
-      expect(result.result).toMatchObject({ output: { tasks: [{ status: "cancelled" }] } });
-      expect(result.session.state?.[AGENT_HANDLES_STATE_KEY]).toMatchObject({
-        handles: [{ phase: "addressed" }],
-      });
-    },
-  );
-
-  it("cancels a dynamic remote task with its creation-time credential resolver", async () => {
-    const session = createSession("remote");
-    const handleStore = session.state?.[AGENT_HANDLES_STATE_KEY] as {
-      handles: Array<{ address: { credentialResolver?: { resolverId?: string } } }>;
-    };
-    handleStore.handles[0]!.address.credentialResolver = {
-      resolverId: "dynamic-credentials-step",
-    };
+  it("does not reinterpret an unknown executor binding", async () => {
+    const external = { data: { id: "external" }, kind: "external" };
     vi.mocked(readLatestTaskView).mockResolvedValue({
-      metadata: {
-        agentId: "agent-1",
-        kind: "subagent",
-        mode: "remote",
-        name: "research",
-      },
-      executor: {
-        binding: {
-          data: {
-            address: handleStore.handles[0]!.address,
-            identity: { id: "agent-1", name: "research", nodeId: "node-1" },
-          },
-          kind: "subagent",
-        },
-        childSessionId: "child-1",
-        childTurnId: "turn_child_7",
-      },
+      executor: { binding: external },
+      metadata: entry.metadata,
       status: "cancelled",
-      taskId: "task-1",
+      taskId: entry.taskId,
     });
-
-    await executeTaskControlAction({
-      action,
-      bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-      parentTurnId: "turn-parent",
-      session,
-    });
-
-    expect(resolveRemoteAgentForAction).not.toHaveBeenCalled();
-    expect(resolveRemoteAgentStreamHeaders).toHaveBeenCalledWith({
-      bundle: expect.any(Object),
-      name: "research",
-      resolverId: "dynamic-credentials-step",
-      url: "https://child.example",
-    });
-    expect(cancelRemoteAgentTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        headers: { authorization: "Bearer fresh" },
-        remote: { name: "research", url: "https://child.example" },
-        sessionId: "child-1",
-        turnId: "turn_child_7",
-      }),
-    );
+    const cancelled = cancelOwnedTask({ entry: { ...entry, executor: external } });
+    await vi.runAllTimersAsync();
+    await cancelled;
+    expect(cancelWorkflowToolRun).not.toHaveBeenCalled();
   });
 
-  it("does not resolve authored credentials when creation recorded none", async () => {
-    const session = createSession("remote");
-    const address = (
-      session.state?.[AGENT_HANDLES_STATE_KEY] as {
-        handles: Array<{ address: { credentialResolver?: { resolverId?: string } } }>;
-      }
-    ).handles[0]!.address;
-    address.credentialResolver = {};
+  it("retries child cancellation after the cancelled task's inbox has closed", async () => {
     vi.mocked(readLatestTaskView).mockResolvedValue({
-      metadata: { agentId: "agent-1", kind: "subagent", mode: "remote", name: "research" },
-      executor: {
-        binding: {
-          data: {
-            address,
-            identity: { id: "agent-1", name: "research", nodeId: "node-1" },
-          },
-          kind: "subagent",
-        },
-        childSessionId: "child-1",
-        childTurnId: "turn_child_7",
-      },
+      metadata: entry.metadata,
       status: "cancelled",
-      taskId: "task-1",
+      taskId: entry.taskId,
     });
+    const cancelOwnedWork = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Child cancellation failed"))
+      .mockResolvedValueOnce(undefined);
+    const session = { sessionId: "parent-session" } as Parameters<
+      typeof cancelOwnedTask
+    >[0]["session"];
+    await expect(cancelOwnedTask({ cancelOwnedWork, entry, session })).rejects.toThrow(
+      "Child cancellation failed",
+    );
+    expect(resumeSessionInbox).not.toHaveBeenCalled();
 
-    await executeTaskControlAction({
-      action,
-      bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-      parentTurnId: "turn-parent",
-      session,
+    vi.mocked(sendTaskCommand).mockResolvedValue("unreachable");
+    await expect(cancelOwnedTask({ cancelOwnedWork, entry, session })).resolves.toMatchObject({
+      status: "cancelled",
     });
-
-    expect(resolveRemoteAgentForAction).not.toHaveBeenCalled();
-    expect(resolveRemoteAgentStreamHeaders).not.toHaveBeenCalled();
-    expect(cancelRemoteAgentTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        headers: {},
-        remote: { name: "research", url: "https://child.example" },
-      }),
+    expect(cancelOwnedWork).toHaveBeenCalledTimes(2);
+    expect(resumeSessionInbox).toHaveBeenCalledTimes(1);
+    expect(cancelOwnedWork.mock.invocationCallOrder[1]).toBeLessThan(
+      vi.mocked(resumeSessionInbox).mock.invocationCallOrder[0]!,
     );
   });
 
-  it("recovers the current dynamic selection for a legacy remote binding", async () => {
-    const dynamicRemoteAgent = {
-      credentialsStepId: "legacy-dynamic-step",
-      description: "Remote research",
-      path: "/eve/v1/session",
-      url: "https://child.example",
-    };
-    vi.mocked(getDynamicSubagentSelection).mockReturnValue({
-      kind: "remote",
-      prepared: {} as never,
-      remoteAgent: dynamicRemoteAgent,
+  it("leaves child work untouched when completion won the cancellation race", async () => {
+    vi.mocked(readLatestTaskView).mockResolvedValue({
+      metadata: entry.metadata,
+      lastOutput: { type: "result", data: "Finished" },
+      status: "completed",
+      taskId: entry.taskId,
     });
-
-    await executeTaskControlAction({
-      action,
-      bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-      parentTurnId: "turn-parent",
-      serializedContext: { context: "serialized" },
-      session: createSession("remote"),
-    });
-
-    expect(deserializeContext).toHaveBeenCalledWith({ context: "serialized" });
-    expect(resolveRemoteAgentForAction).toHaveBeenCalledWith(
-      expect.objectContaining({ dynamicRemoteAgent }),
-    );
+    const cancelOwnedWork = vi.fn();
+    await cancelOwnedTask({ cancelOwnedWork, entry });
+    expect(cancelOwnedWork).not.toHaveBeenCalled();
+    expect(cancelWorkflowToolRun).not.toHaveBeenCalled();
   });
 
-  it("does not send current credentials to a legacy child's previous URL", async () => {
-    vi.mocked(getDynamicSubagentSelection).mockReturnValue({
-      kind: "remote",
-      prepared: {} as never,
-      remoteAgent: {
-        credentialsStepId: "new-dynamic-step",
-        description: "Remote research",
-        path: "/eve/v1/session",
-        url: "https://new-child.example",
+  it("hard-cancels a task run that does not unwind cooperatively", async () => {
+    vi.mocked(readLatestTaskView).mockResolvedValue({
+      metadata: entry.metadata,
+      status: "cancelled",
+      taskId: entry.taskId,
+    });
+    getRun.mockReturnValue({ status: Promise.resolve("running") });
+
+    const cancelled = cancelOwnedTask({ entry });
+    await vi.runAllTimersAsync();
+    await cancelled;
+
+    expect(cancelRun).toHaveBeenCalledWith({}, "task-run", {
+      cancelReason: "Task task-1 was cancelled.",
+    });
+  });
+
+  it("preserves the committed parent notification when cancellation stops a slow task run", async () => {
+    const view = { metadata: entry.metadata, status: "cancelled", taskId: entry.taskId } as const;
+    vi.mocked(readLatestTaskView).mockResolvedValue(view);
+    getRun.mockReturnValue({ status: Promise.resolve("running") });
+    const session = { sessionId: "parent-session" } as Parameters<
+      typeof cancelOwnedTask
+    >[0]["session"];
+    const cancelled = cancelOwnedTask({ entry, session });
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(cancelRun).not.toHaveBeenCalled();
+    expect(resumeSessionInbox).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(cancelled).resolves.toEqual(view);
+
+    expect(cancelRun).toHaveBeenCalledTimes(1);
+    expect(resumeSessionInbox).toHaveBeenCalledExactlyOnceWith("eve:session:parent-session:inbox", {
+      kind: "send",
+      payload: {
+        message: "Background task task-1 (export) is cancelled.",
+        task: { views: [view] },
       },
+      taskDeliveryId: "task-1:ready:cancelled",
     });
-    vi.mocked(resolveRemoteAgentForAction).mockReturnValue({
-      name: "research",
-      url: "https://new-child.example",
-    } as never);
-
-    await executeTaskControlAction({
-      action,
-      bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-      parentTurnId: "turn-parent",
-      serializedContext: { context: "serialized" },
-      session: createSession("remote"),
-    });
-
-    expect(cancelRemoteAgentTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        headers: {},
-        remote: { name: "research", url: "https://child.example" },
-      }),
+    expect(vi.mocked(cancelRun).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(resumeSessionInbox).mock.invocationCallOrder[0]!,
     );
-    expect(resolveRemoteAgentStreamHeaders).not.toHaveBeenCalled();
   });
 
-  it("uses fresh current credentials when a legacy child's URL still matches", async () => {
-    const auth = vi.fn();
-    const headers = vi.fn();
-    vi.mocked(resolveRemoteAgentForAction).mockReturnValue({
-      auth,
-      headers,
-      name: "research",
-      url: "https://child.example",
-    } as never);
+  it("retries the parent notification after the cancelled task inbox is gone", async () => {
+    const view = { metadata: entry.metadata, status: "cancelled", taskId: entry.taskId } as const;
+    vi.mocked(readLatestTaskView).mockResolvedValue(view);
+    getRun.mockReturnValue({ status: Promise.resolve("running") });
+    vi.mocked(resumeSessionInbox).mockRejectedValueOnce(new Error("temporary delivery failure"));
+    const session = { sessionId: "parent-session" } as Parameters<
+      typeof cancelOwnedTask
+    >[0]["session"];
+    const cancelled = cancelOwnedTask({ entry, session });
+    const failed = expect(cancelled).rejects.toThrow("temporary delivery failure");
+    await vi.runAllTimersAsync();
+    await failed;
 
-    await executeTaskControlAction({
-      action,
-      bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-      parentTurnId: "turn-parent",
-      session: createSession("remote"),
+    vi.mocked(sendTaskCommand).mockResolvedValue("unreachable");
+    getRun.mockReturnValue({ status: Promise.resolve("cancelled") });
+    await expect(cancelOwnedTask({ entry, session })).resolves.toEqual(view);
+    expect(cancelRun).toHaveBeenCalledTimes(1);
+    expect(cancelWorkflowToolRun).toHaveBeenCalledTimes(2);
+    expect(resumeSessionInbox).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(resumeSessionInbox).mock.calls[1]).toEqual(
+      vi.mocked(resumeSessionInbox).mock.calls[0],
+    );
+  });
+});
+
+describe("task updates", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("forwards a task-owned update and confirms delivery", async () => {
+    const deliverUpdate = vi.fn(async () => "task-1");
+
+    const result = await executeTaskControlAction({
+      deliverUpdate,
+      action: {
+        callId: "call-update",
+        input: { message: "Working" },
+        kind: "tool-call",
+        toolName: "task_update",
+      },
+      bundle: {} as never,
+      parentStepIndex: 2,
+      parentTurnId: "turn-child",
+      serializedContext: { "eve.sessionCallback": { taskId: "task-1" } },
+      session: {} as never,
     });
 
-    expect(cancelRemoteAgentTurn).toHaveBeenCalledWith(
+    expect(deliverUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
-        remote: expect.objectContaining({
-          auth,
-          headers,
-          name: "research",
-          url: "https://child.example",
+        update: expect.objectContaining({
+          message: "Working",
+          updateEpoch: "turn-child",
+          updateIndex: 2,
         }),
       }),
     );
-    expect(vi.mocked(cancelRemoteAgentTurn).mock.calls[0]?.[0]).not.toHaveProperty("headers");
+    expect(result.result).toMatchObject({ output: { status: "sent", taskId: "task-1" } });
   });
 
-  it("preserves resolved headers when retrying an unguarded remote cancel", async () => {
-    vi.mocked(cancelRemoteAgentTurn)
-      .mockResolvedValueOnce({ status: "no_active_turn" })
-      .mockResolvedValueOnce({ sessionId: "child-1", status: "accepted" });
-    const session = createSession("remote");
-    const address = (
-      session.state?.[AGENT_HANDLES_STATE_KEY] as {
-        handles: Array<{ address: { credentialResolver?: { resolverId?: string } } }>;
-      }
-    ).handles[0]!.address;
-    address.credentialResolver = { resolverId: "dynamic-credentials-step" };
-    vi.mocked(readLatestTaskView).mockResolvedValue({
-      metadata: { agentId: "agent-1", kind: "subagent", mode: "remote", name: "research" },
-      executor: {
-        binding: {
-          data: {
-            address,
-            identity: { id: "agent-1", name: "research", nodeId: "node-1" },
-          },
-          kind: "subagent",
-        },
-        childSessionId: "child-1",
-        childTurnId: "turn_child_7",
+  it("forwards a local task-owned child update through the subagent adapter hook", async () => {
+    const deliverUpdate = vi.fn(async () => "task-1");
+    const result = await executeTaskControlAction({
+      deliverUpdate,
+      action: {
+        callId: "call-update",
+        input: { message: "Working" },
+        kind: "tool-call",
+        toolName: "task_update",
       },
-      status: "cancelled",
-      taskId: "task-1",
+      adapter: {
+        kind: "subagent",
+        state: {
+          callId: "call-agent",
+          parentContinuationToken: "agent-reply-hook",
+          parentSessionId: "session-parent",
+          subagentName: "worker",
+          taskId: "task-1",
+        },
+      },
+      bundle: {} as never,
+      parentStepIndex: 2,
+      parentTurnId: "turn-child",
+      serializedContext: {},
+      session: {} as never,
     });
 
-    await executeTaskControlAction({
-      action,
-      bundle: { subagentRegistry: { subagentsByNodeId: new Map() } } as never,
-      parentTurnId: "turn-parent",
-      session,
+    expect(deliverUpdate).toHaveBeenCalledWith({
+      adapter: expect.objectContaining({ kind: "subagent" }),
+      callback: undefined,
+      update: {
+        callId: "call-update",
+        kind: "task-update",
+        message: "Working",
+        updateEpoch: "turn-child",
+        updateIndex: 2,
+      },
     });
-
-    expect(cancelRemoteAgentTurn).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ headers: { authorization: "Bearer fresh" } }),
-    );
-    expect(vi.mocked(cancelRemoteAgentTurn).mock.calls[1]?.[0]).not.toHaveProperty("turnId");
-  });
-
-  it("uses task-scoped cancellation before child-turn identity arrives", async () => {
-    vi.mocked(readLatestTaskView).mockResolvedValue({
-      metadata: { agentId: "agent-1", kind: "subagent", mode: "local", name: "research" },
-      status: "cancelled",
-      taskId: "task-1",
-    });
-
-    await executeTaskControlAction({
-      action,
-      bundle: {} as CompiledBundle,
-      parentTurnId: "turn-parent",
-      session: createSession("local"),
-    });
-
-    expect(requestWorkflowTurnCancellation).toHaveBeenCalledWith({
-      sessionId: "child-1",
-      taskId: "task-1",
-    });
-    expect(cancelRemoteAgentTurn).not.toHaveBeenCalled();
-  });
-
-  it("does not propagate a repeated cancel after the task hook is disposed", async () => {
-    vi.mocked(sendTaskCommand).mockResolvedValue("unreachable");
-
-    await executeTaskControlAction({
-      action,
-      bundle: {} as CompiledBundle,
-      parentTurnId: "turn-parent",
-      session: createSession("local"),
-    });
-
-    expect(requestWorkflowTurnCancellation).not.toHaveBeenCalled();
-    expect(cancelRemoteAgentTurn).not.toHaveBeenCalled();
-  });
-
-  it("fails instead of reporting success when cancellation does not commit", async () => {
-    vi.useFakeTimers();
-    vi.mocked(readLatestTaskView).mockResolvedValue({
-      metadata: { agentId: "agent-1", kind: "subagent", mode: "local", name: "research" },
-      status: "working",
-      taskId: "task-1",
-    });
-    try {
-      const pending = executeTaskControlAction({
-        action,
-        bundle: {} as CompiledBundle,
-        parentTurnId: "turn-parent",
-        session: createSession("local"),
-      });
-      const rejected = expect(pending).rejects.toThrow("did not commit cancellation");
-      await vi.runAllTimersAsync();
-      await rejected;
-      expect(requestWorkflowTurnCancellation).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(result.result).toMatchObject({ output: { status: "sent", taskId: "task-1" } });
   });
 });

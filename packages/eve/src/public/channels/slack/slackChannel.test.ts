@@ -911,8 +911,7 @@ describe("slackChannel() default event handlers", () => {
     await callEvent(
       adapter,
       makeEvent("reasoning.appended", {
-        reasoningDelta: longReasoning,
-        reasoningSoFar: `${longReasoning}\nThen continue.`,
+        reasoningDelta: `${longReasoning}\nThen continue.`,
         sequence: 0,
         stepIndex: 0,
         turnId: "t1",
@@ -942,26 +941,26 @@ describe("slackChannel() default event handlers", () => {
       THREAD_STATE,
     );
     const ctx = buildAdapterContext(adapter, stubAccessor());
-    const reasoningEvent = (reasoningDelta: string, reasoningSoFar: string) =>
+    const reasoningEvent = (reasoningDelta: string) =>
       makeEvent("reasoning.appended", {
         reasoningDelta,
-        reasoningSoFar,
         sequence: 0,
         stepIndex: 0,
         turnId: "t1",
       });
 
-    await callEvent(adapter, reasoningEvent("I", "I"), ctx);
-    await callEvent(adapter, reasoningEvent(" ca", "I ca"), ctx);
-    await callEvent(adapter, reasoningEvent("n", "I can"), ctx);
+    await callEvent(adapter, reasoningEvent("I"), ctx);
+    await callEvent(adapter, reasoningEvent(" ca"), ctx);
+    await callEvent(adapter, reasoningEvent("n"), ctx);
 
     const statuses = fetchMock.mock.calls.map(
       ([, init]) => parseSlackRequestBody(init as RequestInit).status,
     );
     expect(statuses).toEqual(["I", "I can"]);
+    expect(ctx.state).not.toHaveProperty("reasoningText");
   });
 
-  it("reasoning.appended requires a matching prefix and four new characters", async () => {
+  it("reasoning.appended refreshes a short extension after the throttle interval", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-18T12:00:00Z"));
     const adapter = withState(
@@ -969,10 +968,9 @@ describe("slackChannel() default event handlers", () => {
       THREAD_STATE,
     );
     const ctx = buildAdapterContext(adapter, stubAccessor());
-    const reasoningEvent = (reasoningSoFar: string) =>
+    const reasoningEvent = (reasoningDelta: string) =>
       makeEvent("reasoning.appended", {
-        reasoningDelta: reasoningSoFar,
-        reasoningSoFar,
+        reasoningDelta,
         sequence: 0,
         stepIndex: 0,
         turnId: "t1",
@@ -980,16 +978,51 @@ describe("slackChannel() default event handlers", () => {
 
     await callEvent(adapter, reasoningEvent("Need"), ctx);
     vi.setSystemTime(new Date("2026-06-18T12:00:01Z"));
-    await callEvent(adapter, reasoningEvent("Need to"), ctx);
-    await callEvent(adapter, reasoningEvent("Check something else"), ctx);
+    await callEvent(adapter, reasoningEvent(" to"), ctx);
     vi.setSystemTime(new Date("2026-06-18T12:00:05Z"));
-    await callEvent(adapter, reasoningEvent("Need to"), ctx);
+    await callEvent(adapter, reasoningEvent("."), ctx);
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const statuses = fetchMock.mock.calls.map(
       ([, init]) => parseSlackRequestBody(init as RequestInit).status,
     );
-    expect(statuses).toEqual(["Need", "Need to"]);
+    expect(statuses).toEqual(["Need", "Need to."]);
+  });
+
+  it("starts fresh reasoning status for completed blocks and new steps", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-18T12:00:00Z"));
+    const adapter = withState(
+      getAdapter(slackChannel({ credentials: { botToken: "xoxb-test" } })),
+      THREAD_STATE,
+    );
+    const ctx = buildAdapterContext(adapter, stubAccessor());
+    const reasoningEvent = (reasoningDelta: string, stepIndex: number) =>
+      makeEvent("reasoning.appended", {
+        reasoningDelta,
+        sequence: 0,
+        stepIndex,
+        turnId: "t1",
+      });
+
+    await callEvent(adapter, reasoningEvent("First block", 0), ctx);
+    await callEvent(
+      adapter,
+      makeEvent("reasoning.completed", {
+        reasoning: "First block",
+        sequence: 0,
+        stepIndex: 0,
+        turnId: "t1",
+      }),
+      ctx,
+    );
+    await callEvent(adapter, reasoningEvent("Second block", 0), ctx);
+    await callEvent(adapter, reasoningEvent("Next step", 1), ctx);
+
+    const statuses = fetchMock.mock.calls.map(
+      ([, init]) => parseSlackRequestBody(init as RequestInit).status,
+    );
+    expect(statuses).toEqual(["First block", "Second block", "Next step"]);
   });
 
   it("turn.started resets reasoning status throttling", async () => {
@@ -1005,7 +1038,6 @@ describe("slackChannel() default event handlers", () => {
       adapter,
       makeEvent("reasoning.appended", {
         reasoningDelta: "Need to inspect the repo.",
-        reasoningSoFar: "Need to inspect the repo.",
         sequence: 0,
         stepIndex: 0,
         turnId: "t1",
@@ -1022,7 +1054,6 @@ describe("slackChannel() default event handlers", () => {
       adapter,
       makeEvent("reasoning.appended", {
         reasoningDelta: "Fresh turn reasoning.",
-        reasoningSoFar: "Fresh turn reasoning.",
         sequence: 1,
         stepIndex: 0,
         turnId: "t2",
@@ -3722,7 +3753,7 @@ describe("slackChannel().receive", () => {
     const [continuationToken, input] = send.mock.calls[0]!;
     expect(continuationToken).toBe("C123:1700000000.000001");
     expect(input.message).toBe("do the thing");
-    expect(input.state).toEqual({
+    expect(input.state).toMatchObject({
       channelId: "C123",
       installationTeamId: null,
       threadTs: "1700000000.000001",
@@ -3730,6 +3761,46 @@ describe("slackChannel().receive", () => {
       triggeringUserId: null,
     });
     expect(input.auth.principalId).toBe("p");
+  });
+
+  it("persists an explicit public audience on the proactive send state", async () => {
+    const send = vi.fn().mockResolvedValue({ id: "s" });
+    await buildReceive()(
+      {
+        message: "do the thing",
+        target: { audience: "public", channelId: "C123", threadTs: "1700000000.000001" },
+        auth: null,
+      },
+      mockChannelContext(send),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(send.mock.calls[0]![1].state).toMatchObject({ audience: "public" });
+  });
+
+  it("persists an explicit private audience on the proactive send state", async () => {
+    const send = vi.fn().mockResolvedValue({ id: "s" });
+    await buildReceive()(
+      {
+        message: "do the thing",
+        target: { audience: "private", channelId: "C_PRIVATE", threadTs: "1700000000.000001" },
+        auth: null,
+      },
+      mockChannelContext(send),
+    );
+    expect(send.mock.calls[0]![1].state).toMatchObject({ audience: "private" });
+  });
+
+  it("omits audience from proactive send state when the target does not supply one", async () => {
+    const send = vi.fn().mockResolvedValue({ id: "s" });
+    await buildReceive()(
+      {
+        message: "do the thing",
+        target: { channelId: "C123", threadTs: "1700000000.000001" },
+        auth: null,
+      },
+      mockChannelContext(send),
+    );
+    expect(send.mock.calls[0]![1].state).not.toHaveProperty("audience");
   });
 
   it("selects and persists the installation workspace for proactive sends", async () => {

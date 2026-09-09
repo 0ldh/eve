@@ -2,16 +2,45 @@ import type { ToolSet, TypedToolCall } from "ai";
 
 import { createRuntimeToolResultFromValue } from "#harness/action-result-helpers.js";
 import type { HarnessEmissionState } from "#harness/emission.js";
-import { createRuntimeActionRequestFromToolCall } from "#harness/runtime-actions.js";
-import type { HarnessToolMap } from "#harness/types.js";
 import {
-  createActionResultEvent,
-  createActionsRequestedEvent,
-  type UnstampedMessageStreamEvent,
-} from "#protocol/message.js";
+  collectActionPresentation,
+  createPresentedRuntimeActionRequestFromToolCall,
+} from "#harness/action-presentation.js";
+import type { HarnessEmitFn, HarnessToolMap } from "#harness/types.js";
+import { createActionResultEvent, createActionsRequestedEvent } from "#protocol/message.js";
 import type { WorkflowSandboxInterrupt } from "#shared/workflow-sandbox.js";
+import {
+  getWorkflowSandboxInterrupt,
+  type WorkflowSandboxContinuationSecurity,
+} from "#shared/workflow-sandbox.js";
 
-type EmitWorkflowLifecycleEvent = (event: UnstampedMessageStreamEvent) => Promise<void>;
+export function createWorkflowLifecycle(input: {
+  readonly emit: EmitWorkflowLifecycleEvent;
+  readonly emissionState: HarnessEmissionState;
+  readonly skipReplayed?: boolean;
+  readonly tools: HarnessToolMap;
+}): {
+  onAfterExecute?: (input: { readonly result: unknown }) => Promise<void>;
+} {
+  return {
+    async onAfterExecute(result) {
+      if (input.skipReplayed) return;
+      const interrupt = await getWorkflowSandboxInterrupt(
+        result.result,
+        {} as WorkflowSandboxContinuationSecurity,
+      );
+      if (interrupt === undefined) return;
+      await emitWorkflowActionsRequested({
+        emit: input.emit,
+        emissionState: input.emissionState,
+        interrupts: [interrupt],
+        tools: input.tools,
+      });
+    },
+  };
+}
+
+type EmitWorkflowLifecycleEvent = HarnessEmitFn;
 
 /** Projects newly parked workflow calls onto eve's existing action stream. */
 export async function emitWorkflowActionsRequested(input: {
@@ -28,9 +57,14 @@ export async function emitWorkflowActionsRequested(input: {
       type: "tool-call",
     } as TypedToolCall<ToolSet>;
 
+    const projection = createPresentedRuntimeActionRequestFromToolCall({
+      toolCall,
+      tools: input.tools,
+    });
     await input.emit(
       createActionsRequestedEvent({
-        actions: [createRuntimeActionRequestFromToolCall({ toolCall, tools: input.tools })],
+        actions: [projection.action],
+        presentation: collectActionPresentation([projection]),
         sequence: input.emissionState.sequence,
         stepIndex: input.emissionState.stepIndex,
         turnId: input.emissionState.turnId,

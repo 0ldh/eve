@@ -14,10 +14,12 @@ import {
 } from "#execution/wire/session-inbox-contract.js";
 import type { SessionInboxWire } from "#execution/wire/session-inbox-encoder.js";
 import { sessionInboxWireV0Migration } from "#execution/wire/session-inbox-wire.v0.js";
-import {
-  normalizeSessionInboxWireV2,
-  sessionInboxWireV1Migration,
-} from "#execution/wire/session-inbox-wire.v2-migration.js";
+import { normalizeSessionInboxWireV2 } from "#execution/wire/session-inbox-wire.v2-migration.js";
+import { sessionInboxWireV1Migration } from "#execution/wire/session-inbox-wire.v2.migration.js";
+import { sessionInboxWireV2Migration } from "#execution/wire/session-inbox-wire.v3.migration.js";
+import { sessionInboxWireV3Migration } from "#execution/wire/session-inbox-wire.v4.migration.js";
+import { sessionInboxWireV4Migration } from "#execution/wire/session-inbox-wire.v5.migration.js";
+import { isObject } from "#shared/guards.js";
 
 /**
  * The session inbox wire family: every payload persisted to a session's
@@ -39,26 +41,52 @@ export type DecodedSessionInbox =
 
 export { SessionInboxWireError } from "#execution/wire/session-inbox-contract.js";
 
-/** Prefixes chain and schema failures alike, so messages read as one voice. */
+/** Prefixes migration and contract failures alike, so messages read as one voice. */
 const WIRE_LABEL = "session inbox payload";
+
+const sessionInboxWireV5Migration: VersionMigration = {
+  from: 5,
+  migrate(prior) {
+    if (!isObject(prior)) throw new Error("session inbox wire v5 value is not an object.");
+    return { ...prior, version: 6 };
+  },
+  to: 6,
+};
 
 const sessionInboxMigrations: readonly VersionMigration[] = [
   sessionInboxWireV0Migration,
   sessionInboxWireV1Migration,
+  sessionInboxWireV2Migration,
+  sessionInboxWireV3Migration,
+  sessionInboxWireV4Migration,
+  sessionInboxWireV5Migration,
 ];
 
 /**
  * Decodes a persisted inbox payload or throws {@link SessionInboxWireError}.
  *
- * Unknown newer versions and shape mismatches both throw: a lost delivery
- * with an operator-visible signal is the designed failure; a reinterpreted
- * delivery is the bug this module exists to prevent.
+ * Unknown newer versions and migration-bound shape mismatches both throw: a
+ * lost delivery with an operator-visible signal is the designed failure; a
+ * reinterpreted delivery is the bug this module exists to prevent.
  */
 function decode(value: unknown): DecodedSessionInbox {
   const declaredVersion =
     typeof value === "object" && value !== null && "version" in value
       ? (value as { readonly version?: unknown }).version
       : undefined;
+  const hasDeclaredVersion = typeof value === "object" && value !== null && "version" in value;
+  if (hasDeclaredVersion && typeof declaredVersion !== "number") {
+    throw new SessionInboxWireError(`${WIRE_LABEL}: value has no numeric "version" field.`);
+  }
+  const normalized = normalizeSessionInboxWireV2(value);
+  if (
+    (declaredVersion === 1 || declaredVersion === 2 || declaredVersion === 3) &&
+    containsCurrentTaskMessages(normalized)
+  ) {
+    throw new SessionInboxWireError(
+      `${WIRE_LABEL} does not match wire version ${declaredVersion}.`,
+    );
+  }
   let migrated: unknown;
   try {
     migrated = runMigrationChain({
@@ -66,7 +94,7 @@ function decode(value: unknown): DecodedSessionInbox {
       label: WIRE_LABEL,
       migrations: sessionInboxMigrations,
       targetVersion: SESSION_INBOX_WIRE_VERSION,
-      value,
+      value: normalized,
     });
   } catch (error) {
     throw new SessionInboxWireError(error instanceof Error ? error.message : String(error));
@@ -78,14 +106,37 @@ function decode(value: unknown): DecodedSessionInbox {
       `${WIRE_LABEL} declares version ${JSON.stringify(wire.version)}, expected ${SESSION_INBOX_WIRE_VERSION}.`,
     );
   }
-  if (declaredVersion === 2 && wire.kind === "deliver" && !("payload" in wire)) {
-    throw new SessionInboxWireError(`${WIRE_LABEL} does not match wire version 2.`);
+  if (
+    typeof declaredVersion === "number" &&
+    declaredVersion >= 2 &&
+    wire.kind === "deliver" &&
+    !("payload" in wire)
+  ) {
+    throw new SessionInboxWireError(
+      `${WIRE_LABEL} does not match wire version ${declaredVersion}.`,
+    );
   }
   return normalizeWire(wire as SessionInboxWire);
 }
 
 /** Workflow-safe consumer facade. */
 export const sessionInboxWire = { decode } as const;
+
+function containsCurrentTaskMessages(value: unknown): boolean {
+  if (!isObject(value) || value.kind !== "deliver") return false;
+  const payloads = Array.isArray(value.payloads) ? value.payloads : [];
+  return payloads.some((payload) => {
+    if (!isObject(payload) || !isObject(payload.task)) return false;
+    if (Object.hasOwn(payload.task, "agentRequests")) return true;
+    const inputRequests = payload.task.inputRequests;
+    return (
+      Array.isArray(inputRequests) &&
+      inputRequests.some(
+        (request) => isObject(request) && ("request" in request || "requests" in request),
+      )
+    );
+  });
+}
 
 /** Strips wire-only fields (`version`, the deliver mirror) for consumption. */
 function normalizeWire(wire: SessionInboxWire): DecodedSessionInbox {
@@ -110,7 +161,7 @@ function normalizeWire(wire: SessionInboxWire): DecodedSessionInbox {
     case "reset":
       return { kind: "reset", reason: wire.reason };
     case "cancel":
-      return { kind: "cancel", taskId: wire.taskId, turnId: wire.turnId };
+      return { kind: "cancel", taskId: wire.taskId, tasks: wire.tasks, turnId: wire.turnId };
     default:
       throw new SessionInboxWireError(
         `${WIRE_LABEL} has an unrecognized kind ${JSON.stringify((wire as { kind?: unknown }).kind)}.`,

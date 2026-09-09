@@ -10,8 +10,19 @@ const EMPTY_DELIVERY_SENTINEL = "<eve-empty-delivery/>";
 function respond(request: MockModelRequest): MockModelResponse | string {
   const message = [...request.userMessages].reverse().find((entry) => entry.trim() !== "") ?? "";
 
+  const examplePrefix = "Alice is documenting conditional delivery. Return exactly this example:\n";
+  if (message.startsWith(examplePrefix)) {
+    return message.slice(examplePrefix.length);
+  }
+  if (message === "Repeat your previous assistant response verbatim.") {
+    return (
+      [...request.messages].reverse().find((entry) => entry.role === "assistant")?.text ??
+      "No previous assistant response."
+    );
+  }
+
   if (request.userMessages.some((entry) => entry.includes(SCHEDULED))) {
-    return respondScheduled(request, message);
+    return respondScheduled(request);
   }
 
   if (message.includes("BACKGROUND-EXPORT-START")) {
@@ -29,7 +40,7 @@ function respond(request: MockModelRequest): MockModelResponse | string {
     return "BACKGROUND-EXPORT-STARTED";
   }
 
-  if (message.includes(`update: ${PROGRESS}`)) {
+  if (message.includes(PROGRESS)) {
     return "BACKGROUND-EXPORT-UPDATE-RECEIVED";
   }
 
@@ -47,10 +58,10 @@ function respond(request: MockModelRequest): MockModelResponse | string {
   return "BACKGROUND-EXPORT-IDLE";
 }
 
-function respondScheduled(request: MockModelRequest, message: string): MockModelResponse | string {
+function respondScheduled(request: MockModelRequest): MockModelResponse | string {
   const taskNotification = [...request.userMessages]
     .reverse()
-    .find((entry) => /^Background task task_[a-z0-9]+/iu.test(entry));
+    .find((entry) => /^(?:Background task|Export) task_[a-z0-9]+/iu.test(entry));
   if (taskNotification?.includes("is completed") && taskNotification.includes(RESULT)) {
     return "SCHEDULED-EXPORT-DONE";
   }
@@ -76,10 +87,6 @@ const base = e2eAgentConfig({ mock: respond });
 
 export default defineAgent({
   ...base,
-  experimental: {
-    ...base.experimental,
-    tasks: true,
-  },
   // Always author the deterministic script so this fixture never depends on a
   // live model; world suites already set EVE_E2E_MODEL=mock.
   model: mockModel(respond),

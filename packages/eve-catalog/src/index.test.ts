@@ -41,6 +41,18 @@ describe("integration catalog", () => {
     }
   });
 
+  it("catalogs Neon with its official MCP endpoint", () => {
+    expect(getIntegrationEntry("neon")).toMatchObject({
+      name: "Neon",
+      kind: "connection",
+      surfaces: { scaffoldable: false, registry: true, gallery: true },
+      connection: {
+        description: "Neon: manage projects, run queries, and make schema changes.",
+        mcp: { url: "https://mcp.neon.tech/mcp" },
+      },
+    });
+  });
+
   it("keeps channels free of connection identity", () => {
     for (const entry of channelEntries()) {
       expect(entry.connection).toBeUndefined();
@@ -110,13 +122,13 @@ describe("integration catalog", () => {
     expect(getIntegrationEntry("jetty")?.connection).toBeUndefined();
   });
 
-  it("exposes Upstash AgentKit as an extension", () => {
-    expect(getIntegrationEntry("upstash-agentkit")?.kind).toBe("extension");
+  it("exposes Upstash AgentKit as a memory provider", () => {
+    expect(getIntegrationEntry("upstash-agentkit")?.kind).toBe("memory");
     expect(getIntegrationEntry("upstash-agentkit")?.connection).toBeUndefined();
   });
 
-  it("exposes Kybernesis Arcana as an extension", () => {
-    expect(getIntegrationEntry("arcana")?.kind).toBe("extension");
+  it("exposes Kybernesis Arcana as a memory provider", () => {
+    expect(getIntegrationEntry("arcana")?.kind).toBe("memory");
     expect(getIntegrationEntry("arcana")?.connection).toBeUndefined();
   });
 
@@ -130,9 +142,21 @@ describe("integration catalog", () => {
     expect(getIntegrationEntry("supermemory")?.connection).toBeUndefined();
   });
 
+  it("exposes file memory as a memory provider", () => {
+    expect(getIntegrationEntry("file")?.kind).toBe("memory");
+    expect(getIntegrationEntry("file")?.connection).toBeUndefined();
+  });
+
   it("exposes Buzz as a gallery-only channel", () => {
     expect(getIntegrationEntry("buzz")).toMatchObject({
       kind: "channel",
+      surfaces: { scaffoldable: false, registry: false, gallery: true },
+    });
+  });
+
+  it("exposes Mux Video as a gallery-only extension", () => {
+    expect(getIntegrationEntry("mux-video")).toMatchObject({
+      kind: "extension",
       surfaces: { scaffoldable: false, registry: false, gallery: true },
     });
   });

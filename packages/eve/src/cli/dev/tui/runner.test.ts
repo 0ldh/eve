@@ -12,17 +12,23 @@ import { getApplicationInfo } from "#internal/application/paths.js";
 import { stampTestEvent } from "#internal/testing/events.js";
 import { createTestAgentInfoResult } from "#internal/testing/agent-info-fixture.js";
 import { resolveTestVercelTarget } from "#internal/testing/verified-vercel-target.js";
-import type { UnstampedMessageStreamEvent } from "#protocol/message.js";
+import {
+  EVE_MESSAGE_STREAM_VERSION,
+  EVE_STREAM_VERSION_HEADER,
+  type UnstampedMessageStreamEvent,
+} from "#protocol/message.js";
 import { createDevelopmentCredentialGate } from "#services/dev-client/credential-gate.js";
 import type { VercelDeploymentResolution } from "#setup/vercel-deployment.js";
 
 import {
   EveTUIRunner,
   parsePromptCommand,
+  registryHandoffAddress,
   type AgentTUIAgentHeader,
   type AgentTUIRenderer,
   type AgentTUISessionOptions,
   type AgentTUIStreamEvent,
+  type PromptCommand,
   type PromptCommandOutcome,
 } from "./runner.js";
 import { createPromptCommandHandler } from "./prompt-command-handler.js";
@@ -43,6 +49,372 @@ const REMOTE_VERIFIED_TARGET = await resolveTestVercelTarget({
 });
 const VERCEL_SSO_URL =
   "https://vercel.com/sso-api?url=https%3A%2F%2Fvpoke.playground-vercel.tools&nonce=test";
+
+describe("registryHandoffAddress", () => {
+  it("accepts only a terminal handoff from the self-modification registry tool", () => {
+    expect(
+      registryHandoffAddress("selfmod__registry_add", {
+        status: "needs-terminal",
+        address: "channel/slack",
+      }),
+    ).toBe("channel/slack");
+    expect(
+      registryHandoffAddress("selfmod__registry_add", {
+        status: "installed",
+        address: "extension/browserbase",
+      }),
+    ).toBeUndefined();
+    expect(
+      registryHandoffAddress("other_tool", {
+        status: "needs-terminal",
+        address: "channel/slack",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("opens every distinct registry handoff in result order", async () => {
+    const handledCommands: Array<Extract<PromptCommand, { type: "extension" }>> = [];
+    const handle = vi.fn(async (command: Extract<PromptCommand, { type: "extension" }>) => {
+      handledCommands.push(command);
+      return { message: "done" };
+    });
+    const renderer = fakeRenderer({
+      readPrompt: vi
+        .fn()
+        .mockResolvedValueOnce("add integrations")
+        .mockResolvedValueOnce(undefined),
+      renderStream: vi.fn(async (result) => {
+        for await (const _event of result.events as AsyncIterable<AgentTUIStreamEvent>) {
+          // Consume the turn so both handoffs reach the runner queue.
+        }
+      }),
+    });
+
+    await new EveTUIRunner({
+      session: sessionYielding([
+        {
+          type: "actions.requested",
+          data: {
+            actions: [
+              {
+                callId: "slack-add",
+                input: { address: "channel/slack" },
+                kind: "tool-call",
+                toolName: "selfmod__registry_add",
+              },
+              {
+                callId: "linear-add",
+                input: { address: "connection/linear" },
+                kind: "tool-call",
+                toolName: "selfmod__registry_add",
+              },
+            ],
+          },
+        },
+        {
+          type: "action.result",
+          data: {
+            result: {
+              callId: "slack-add",
+              kind: "tool-result",
+              output: { status: "needs-terminal", address: "channel/slack" },
+            },
+            status: "completed",
+          },
+        },
+        {
+          type: "action.result",
+          data: {
+            result: {
+              callId: "linear-add",
+              kind: "tool-result",
+              output: { status: "needs-terminal", address: "connection/linear" },
+            },
+            status: "completed",
+          },
+        },
+        { type: "session.completed" },
+      ]),
+      renderer,
+      name: "Weather Agent",
+      appRoot: "/tmp/weather-agent",
+      bootDetections: [],
+      detectProjectIdentity: vi.fn(async () => undefined),
+      promptCommandHandler: { handle },
+    }).run();
+
+    expect(handledCommands).toEqual([
+      { type: "extension", name: "add", argument: "channel/slack" },
+      { type: "extension", name: "add", argument: "connection/linear" },
+    ]);
+  });
+
+  it("submits a parallel approval response before opening queued setup", async () => {
+    const order: string[] = [];
+    const session = stubSession();
+    vi.spyOn(session, "send").mockResolvedValueOnce(
+      messageResponseOf([
+        {
+          type: "actions.requested",
+          data: {
+            actions: [
+              {
+                callId: "registry-add",
+                input: { address: "channel/slack" },
+                kind: "tool-call",
+                toolName: "selfmod__registry_add",
+              },
+            ],
+          },
+        },
+        {
+          type: "action.result",
+          data: {
+            result: {
+              callId: "registry-add",
+              kind: "tool-result",
+              output: { status: "needs-terminal", address: "channel/slack" },
+            },
+            status: "completed",
+          },
+        },
+        {
+          type: "input.requested",
+          data: {
+            requests: [
+              {
+                action: {
+                  callId: "write-file",
+                  input: { path: "agent.ts" },
+                  kind: "tool-call",
+                  toolName: "write_file",
+                },
+                display: "confirmation",
+                kind: "tool-approval",
+                options: [
+                  { id: "approve", label: "Approve" },
+                  { id: "cancel", label: "Cancel" },
+                ],
+                prompt: "Approve write_file",
+                requestId: "approval-1",
+              },
+            ],
+          },
+        },
+        { type: "session.waiting" },
+      ]),
+    );
+    vi.spyOn(session, "respond").mockImplementationOnce(async () => {
+      order.push("respond");
+      return messageResponseOf([{ type: "session.completed" }]);
+    });
+    const handle = vi.fn(async () => {
+      order.push("setup");
+      return { message: "done" };
+    });
+
+    await new EveTUIRunner({
+      session,
+      renderer: fakeRenderer({
+        readPrompt: vi.fn().mockResolvedValueOnce("add slack").mockResolvedValueOnce(undefined),
+        readToolApproval: vi.fn(async () => ({ approved: true })),
+        renderStream: vi.fn(async (result) => {
+          for await (const _event of result.events as AsyncIterable<AgentTUIStreamEvent>) {
+            // Consume each continuation to its boundary.
+          }
+        }),
+      }),
+      name: "Weather Agent",
+      appRoot: "/tmp/weather-agent",
+      bootDetections: [],
+      detectProjectIdentity: vi.fn(async () => undefined),
+      promptCommandHandler: { handle },
+    }).run();
+
+    expect(order).toEqual(["respond", "setup"]);
+    expect(session.respond).toHaveBeenCalledWith(
+      [{ requestId: "approval-1", optionId: "approve" }],
+      expect.any(Object),
+    );
+  });
+
+  it("suspends the idle prompt before opening a subagent registry handoff", async () => {
+    const idlePromptStarted = createDeferred<void>();
+    const promptSuspended = createDeferred<void>();
+    const handle = vi.fn(async () => ({
+      message: "Slack setup completed.",
+      tone: "success" as const,
+    }));
+    const client = stubClient();
+    const fetchChild = vi
+      .spyOn(client, "fetch")
+      .mockResolvedValueOnce(
+        messageStreamResponseOf([
+          stampTestEvent(
+            {
+              type: "actions.requested",
+              data: {
+                actions: [
+                  {
+                    callId: "registry-add",
+                    input: { address: "channel/slack" },
+                    kind: "tool-call",
+                    toolName: "selfmod__registry_add",
+                  },
+                ],
+                sequence: 1,
+                stepIndex: 0,
+                turnId: "child-turn",
+              },
+            } as UnstampedMessageStreamEvent,
+            0,
+          ),
+          stampTestEvent(
+            {
+              type: "input.requested",
+              data: {
+                requests: [
+                  {
+                    action: {
+                      callId: "registry-add",
+                      input: { address: "channel/slack" },
+                      kind: "tool-call",
+                      toolName: "selfmod__registry_add",
+                    },
+                    display: "confirmation",
+                    kind: "tool-approval",
+                    options: [
+                      { id: "approve", label: "Approve" },
+                      { id: "cancel", label: "Cancel" },
+                    ],
+                    prompt: "Approve tool call: selfmod__registry_add",
+                    requestId: "approval-1",
+                  },
+                ],
+                sequence: 2,
+                stepIndex: 0,
+                turnId: "child-turn",
+              },
+            } as UnstampedMessageStreamEvent,
+            1,
+          ),
+          stampTestEvent(
+            {
+              type: "session.waiting",
+              data: { continuationToken: "child-session", wait: "next-user-message" },
+            } as UnstampedMessageStreamEvent,
+            2,
+          ),
+        ]),
+      )
+      .mockImplementationOnce(async () => {
+        await idlePromptStarted.promise;
+        return messageStreamResponseOf([
+          stampTestEvent(
+            {
+              type: "actions.requested",
+              data: {
+                actions: [
+                  {
+                    callId: "registry-add",
+                    input: { address: "channel/slack" },
+                    kind: "tool-call",
+                    toolName: "selfmod__registry_add",
+                  },
+                ],
+                sequence: 3,
+                stepIndex: 0,
+                turnId: "child-turn",
+              },
+            } as UnstampedMessageStreamEvent,
+            3,
+          ),
+          stampTestEvent(
+            {
+              type: "action.result",
+              data: {
+                result: {
+                  callId: "registry-add",
+                  kind: "tool-result",
+                  output: { status: "needs-terminal", address: "channel/slack" },
+                  toolName: "selfmod__registry_add",
+                },
+                sequence: 4,
+                status: "completed",
+                stepIndex: 0,
+                turnId: "child-turn",
+              },
+            } as UnstampedMessageStreamEvent,
+            4,
+          ),
+          stampTestEvent({ type: "session.completed" } as UnstampedMessageStreamEvent, 5),
+        ]);
+      });
+    const renderer = fakeRenderer({
+      readPrompt: vi
+        .fn()
+        .mockResolvedValueOnce("add slack")
+        .mockImplementationOnce(async () => {
+          idlePromptStarted.resolve();
+          await promptSuspended.promise;
+          return undefined;
+        }),
+      renderStream: vi.fn(async (result) => {
+        for await (const _event of result.events as AsyncIterable<AgentTUIStreamEvent>) {
+          // Consume the parent stream while the child pump follows its session.
+        }
+      }),
+      suspendPromptForInput: () => promptSuspended.resolve(),
+      subagents: {
+        begin: vi.fn(),
+        background: vi.fn(),
+        upsertStep: vi.fn(),
+        upsertTool: vi.fn(),
+        removeTool: vi.fn(),
+        complete: vi.fn(),
+        markChildToolCallId: vi.fn(),
+      },
+    });
+
+    await new EveTUIRunner({
+      client,
+      session: sessionYielding([
+        {
+          type: "subagent.called",
+          data: {
+            callId: "selfmod-call",
+            childSessionId: "child-session",
+            childStreamPath: "/eve/v1/session/child-session/stream",
+            name: "self-modification",
+            sequence: 0,
+            turnId: "parent-turn",
+          },
+        },
+        { type: "turn.completed", data: { sequence: 1, turnId: "parent-turn" } },
+        {
+          type: "session.waiting",
+          data: { continuationToken: "parent-session", wait: "next-user-message" },
+        },
+      ]),
+      renderer,
+      name: "Weather Agent",
+      appRoot: "/tmp/weather-agent",
+      bootDetections: [],
+      detectProjectIdentity: vi.fn(async () => undefined),
+      promptCommandHandler: { handle },
+    }).run();
+
+    expect(fetchChild).toHaveBeenNthCalledWith(
+      2,
+      "/eve/v1/session/child-session/stream?startIndex=3",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(handle).toHaveBeenCalledWith(
+      { type: "extension", name: "add", argument: "channel/slack" },
+      expect.objectContaining({ title: "Add to your agent" }),
+    );
+  });
+});
 
 /**
  * Real `Client` whose network-touching methods are replaced by vi spies.
@@ -93,6 +465,9 @@ function messageStreamResponseOf(events: readonly MessageStreamEvent[]): Respons
         controller.close();
       },
     }),
+    {
+      headers: { [EVE_STREAM_VERSION_HEADER]: EVE_MESSAGE_STREAM_VERSION },
+    },
   );
 }
 
@@ -186,7 +561,7 @@ function idleSetupFlow(): SetupFlowRenderer {
     renderOutput: vi.fn(),
     withInheritedStdio: (task) => task(),
     waitForInterrupt: () => ({
-      promise: new Promise<void>(() => {}),
+      promise: new Promise<"escape" | "ctrl-c">(() => {}),
       dispose: vi.fn(),
     }),
   };
@@ -502,7 +877,7 @@ describe("EveTUIRunner idle session follow", () => {
       }),
       name: "Weather Agent",
       appRoot: "/tmp/weather-agent",
-      initialInput: "/model",
+      onboard: true,
       bootDetections: [],
       getVercelAuthStatus: vi.fn(async (): Promise<"authenticated"> => "authenticated"),
       promptCommandHandler: { handle },
@@ -562,7 +937,6 @@ describe("EveTUIRunner idle session follow", () => {
         type: "message.appended",
         data: {
           messageDelta: "Background research finished.",
-          messageSoFar: "Background research finished.",
           sequence: 1,
           stepIndex: 1,
           turnId: "wake-turn",
@@ -606,7 +980,6 @@ describe("EveTUIRunner idle session follow", () => {
           type: "message.appended",
           data: {
             messageDelta: "Follow-up answer.",
-            messageSoFar: "Follow-up answer.",
             sequence: 2,
             stepIndex: 0,
             turnId: "follow-up-turn",
@@ -913,6 +1286,7 @@ describe("EveTUIRunner development session continuity", () => {
     const encoder = new TextEncoder();
     let nextRevision = 0;
     let nextSession = 0;
+    let nextDelivery = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -933,7 +1307,7 @@ describe("EveTUIRunner development session continuity", () => {
             url.pathname === "/eve/v1/session"
               ? `session-${String(++nextSession)}`
               : (url.pathname.split("/")[4] ?? `session-${String(++nextSession)}`);
-          return Response.json({ sessionId });
+          return Response.json({ sessionId, deliveryId: `delivery-${++nextDelivery}` });
         }
 
         return new Response(
@@ -941,17 +1315,25 @@ describe("EveTUIRunner development session continuity", () => {
             start(controller) {
               controller.enqueue(
                 encoder.encode(
-                  `${JSON.stringify(
-                    stampTestEvent({
+                  `${JSON.stringify({
+                    ...stampTestEvent({
                       type: "session.waiting",
                       data: { continuationToken: "session-id", wait: "next-user-message" },
                     } as UnstampedMessageStreamEvent),
-                  )}\n`,
+                    meta: {
+                      at: new Date().toISOString(),
+                      id: `event-${nextDelivery}`,
+                      deliveryIds: [`delivery-${nextDelivery}`],
+                    },
+                  })}\n`,
                 ),
               );
               controller.close();
             },
           }),
+          {
+            headers: { [EVE_STREAM_VERSION_HEADER]: EVE_MESSAGE_STREAM_VERSION },
+          },
         );
       }),
     );
@@ -1804,7 +2186,6 @@ describe("EveTUIRunner reused step indexes", () => {
         type: "message.appended",
         data: {
           messageDelta: "I'll call the subagent.",
-          messageSoFar: "I'll call the subagent.",
           sequence: 0,
           stepIndex: 0,
           turnId: "t0",
@@ -1826,7 +2207,6 @@ describe("EveTUIRunner reused step indexes", () => {
         type: "message.appended",
         data: {
           messageDelta: "The subagent returned TOKEN-123.",
-          messageSoFar: "The subagent returned TOKEN-123.",
           sequence: 0,
           stepIndex: 0,
           turnId: "t0",
@@ -1881,7 +2261,6 @@ describe("EveTUIRunner replay guards", () => {
         type: "message.appended",
         data: {
           messageDelta: "Sunny.",
-          messageSoFar: "Sunny.",
           sequence: 0,
           stepIndex: 0,
           turnId: "turn_0",
@@ -1927,7 +2306,7 @@ describe("EveTUIRunner replay guards", () => {
     expect(deltas).toEqual([{ type: "assistant-delta", id: "text:turn_0:0", delta: "Sunny." }]);
   });
 
-  it("deduplicates repeated call IDs and divergent text attempts in one turn", async () => {
+  it("deduplicates repeated call IDs and replaces retried text with the completed text", async () => {
     const prompts: Array<string | undefined> = ["weather", undefined];
     const emitted: AgentTUIStreamEvent[] = [];
     const session = sessionYielding([
@@ -2011,7 +2390,6 @@ describe("EveTUIRunner replay guards", () => {
         type: "message.appended",
         data: {
           messageDelta: "Using",
-          messageSoFar: "Using",
           sequence: 0,
           stepIndex: 1,
           turnId: "turn_0",
@@ -2021,7 +2399,6 @@ describe("EveTUIRunner replay guards", () => {
         type: "message.appended",
         data: {
           messageDelta: " the first",
-          messageSoFar: "Using the first",
           sequence: 0,
           stepIndex: 1,
           turnId: "turn_0",
@@ -2031,7 +2408,15 @@ describe("EveTUIRunner replay guards", () => {
         type: "message.appended",
         data: {
           messageDelta: " the retry",
-          messageSoFar: "Using the retry",
+          sequence: 0,
+          stepIndex: 1,
+          turnId: "turn_0",
+        },
+      },
+      {
+        type: "message.appended",
+        data: {
+          messageDelta: " collision",
           sequence: 0,
           stepIndex: 1,
           turnId: "turn_0",
@@ -2042,16 +2427,6 @@ describe("EveTUIRunner replay guards", () => {
         data: {
           finishReason: "stop",
           message: "Using the first answer.",
-          sequence: 0,
-          stepIndex: 1,
-          turnId: "turn_0",
-        },
-      },
-      {
-        type: "message.appended",
-        data: {
-          messageDelta: " answer.",
-          messageSoFar: "Using the retry answer.",
           sequence: 0,
           stepIndex: 1,
           turnId: "turn_0",
@@ -2105,15 +2480,22 @@ describe("EveTUIRunner replay guards", () => {
 
     const toolCalls = emitted.filter((event) => event.type === "tool-call");
     const toolResults = emitted.filter((event) => event.type === "tool-result");
-    const assistantText = emitted
+    const streamedText = emitted
       .filter((event) => event.type === "assistant-delta")
       .map((event) => event.delta)
       .join("");
+    const assistantCompletes = emitted.filter((event) => event.type === "assistant-complete");
 
     expect(toolCalls.map((event) => event.toolCallId)).toEqual(["call-original", "call-replay"]);
     expect(toolResults.map((event) => event.toolCallId)).toEqual(["call-original", "call-replay"]);
-    expect(assistantText).toBe("Using the first answer.");
-    expect(assistantText).not.toContain("retry");
+    expect(streamedText).toContain("the retry collision");
+    expect(assistantCompletes).toEqual([
+      {
+        type: "assistant-complete",
+        id: "text:turn_0:1",
+        text: "Using the first answer.",
+      },
+    ]);
     expect(emitted.filter((event) => event.type === "finish")).toHaveLength(1);
   });
 
@@ -2825,6 +3207,9 @@ describe("EveTUIRunner renderer teardown", () => {
             signal.addEventListener("abort", () => controller.close(), { once: true });
           },
         }),
+        {
+          headers: { [EVE_STREAM_VERSION_HEADER]: EVE_MESSAGE_STREAM_VERSION },
+        },
       );
     });
 
@@ -3141,7 +3526,7 @@ describe("EveTUIRunner boot setup detection", () => {
       serverUrl: "http://localhost:3000",
       name: "Weather Agent",
       appRoot: "/tmp/weather-agent",
-      initialInput: "/model",
+      onboard: true,
       bootDetections: input.bootDetections ?? [
         {
           id: "test",
@@ -3180,16 +3565,15 @@ describe("EveTUIRunner boot setup detection", () => {
     expect(warnings).toEqual(["1 setup issue: AI Gateway credentials · /model"]);
   });
 
-  it("runs the initial model onboarding prerequisites before opening /model", async () => {
+  it("runs initial onboarding as one-way model and registry phases", async () => {
     const order: string[] = [];
-    const authStatuses: Array<"cli-missing" | "logged-out" | "authenticated"> = [
-      "cli-missing",
-      "logged-out",
-      "authenticated",
-    ];
+    const results: string[] = [];
+    const stages: string[] = [];
     const handle = vi.fn(async (command: { name: string }) => {
       order.push(command.name);
-      return { message: "/model dismissed." };
+      return command.name === "model"
+        ? { message: "/model failed: provider unavailable", tone: "error" as const }
+        : { message: `/${command.name} dismissed.` };
     });
     const renderer = fakeRenderer({
       readPrompt: vi.fn(async (options?: AgentTUISessionOptions) => {
@@ -3197,6 +3581,7 @@ describe("EveTUIRunner boot setup detection", () => {
         expect(options?.initialDraft).toBeUndefined();
         return undefined;
       }),
+      renderCommandResult: (message) => results.push(message),
       setupFlow: createFakeSetupFlowRenderer(),
     });
     const runner = new EveTUIRunner({
@@ -3204,82 +3589,160 @@ describe("EveTUIRunner boot setup detection", () => {
       renderer,
       name: "Weather Agent",
       appRoot: "/tmp/weather-agent",
-      initialInput: "/model",
-      bootDetections: [
-        {
-          id: "test",
-          detect: () => [
-            {
-              kind: "attention",
-              label: "model provider not linked",
-              command: "/model",
-            },
-          ],
-        },
-      ],
-      getVercelAuthStatus: vi.fn(async () => authStatuses.shift() ?? "authenticated"),
+      onboard: true,
+      bootDetections: [],
+      onOnboardingStep: ({ step }) => stages.push(step),
+      onOnboardingTerminal: ({ step, result }) => stages.push(`${step}_${result}`),
       promptCommandHandler: { handle },
     });
 
     await runner.run();
 
-    expect(order).toEqual(["vc:install", "vc:login", "model", "add", "prompt"]);
-    expect(handle).toHaveBeenNthCalledWith(
-      1,
-      { type: "extension", name: "vc:install", argument: "" },
-      expect.objectContaining({ keepSetupFlowOpen: true }),
-    );
-    expect(handle).toHaveBeenNthCalledWith(
-      2,
-      { type: "extension", name: "vc:login", argument: "" },
-      expect.objectContaining({ keepSetupFlowOpen: true }),
-    );
+    expect(order).toEqual(["model", "prompt"]);
+    expect(stages).toEqual(["model_provider", "model_provider_error"]);
+    expect(results).toContain("/model failed: provider unavailable");
     expect(handle).toHaveBeenCalledWith(
       { type: "extension", name: "model", argument: "" },
-      { renderer, title: "Weather Agent", initialModelStep: "provider" },
+      expect.objectContaining({
+        renderer,
+        title: "Weather Agent",
+        initialModelStep: "provider",
+        keepSetupFlowOpen: true,
+        setupFlowNavigation: {
+          kind: "planner",
+          activeStep: 0,
+          firstNavigableStep: 1,
+          steps: [
+            { label: "Model", complete: false },
+            { label: "Channels" },
+            { label: "Integrations" },
+            { label: "Review" },
+          ],
+        },
+      }),
     );
-    expect(handle).toHaveBeenCalledWith(
+    expect(handle).not.toHaveBeenCalledWith(
       { type: "extension", name: "add", argument: "" },
-      { renderer, title: "Weather Agent" },
+      expect.anything(),
     );
   });
 
-  it("stops onboarding when Vercel CLI installation leaves the CLI unavailable", async () => {
+  it("moves from Model to Channels and preserves diagnostics after a failed registry phase", async () => {
     const order: string[] = [];
-    const authStatuses: Array<"cli-missing"> = ["cli-missing", "cli-missing"];
-    const end = vi.fn();
-    const setupFlow = createFakeSetupFlowRenderer({ end });
+    const stages: string[] = [];
+    const end = vi.fn(() => order.push("end"));
+    const handle = vi.fn(async (command: { name: string }) => {
+      order.push(command.name);
+      return command.name === "add"
+        ? { message: "/add failed", tone: "error" as const }
+        : { message: "model ready" };
+    });
+    const renderer = fakeRenderer({
+      readPrompt: vi.fn(async () => {
+        order.push("prompt");
+        return undefined;
+      }),
+      setupFlow: createFakeSetupFlowRenderer({ end }),
+    });
     const runner = new EveTUIRunner({
       session: sessionYielding([]),
-      renderer: fakeRenderer({ setupFlow }),
+      renderer,
       name: "Weather Agent",
       appRoot: "/tmp/weather-agent",
-      initialInput: "/model",
-      bootDetections: [
-        {
-          id: "test",
-          detect: () => [
-            {
-              kind: "attention",
-              label: "model provider not linked",
-              command: "/model",
-            },
-          ],
+      onboard: true,
+      bootDetections: [],
+      onOnboardingStep: ({ step }) => stages.push(step),
+      onOnboardingTerminal: ({ step, result }) => stages.push(`${step}_${result}`),
+      promptCommandHandler: { handle },
+    });
+
+    await runner.run();
+
+    expect(order).toEqual(["model", "add", "end", "prompt"]);
+    expect(stages).toEqual(["model_provider", "registry_channels", "registry_channels_error"]);
+    expect(end).toHaveBeenCalledWith({ preserveDiagnostics: true });
+    expect(handle).toHaveBeenNthCalledWith(
+      2,
+      { type: "extension", name: "add", argument: "" },
+      expect.not.objectContaining({ setupFlowNavigation: expect.anything() }),
+    );
+    expect(handle).toHaveBeenNthCalledWith(
+      2,
+      { type: "extension", name: "add", argument: "" },
+      expect.objectContaining({
+        registryPlannerContext: {
+          prefixSteps: [{ label: "Model", complete: true }],
+          reviewMessage: "Review your agent",
+          primaryActionLabel: "Install and finish setup",
+          emptyActionLabel: "Finish setup",
         },
-      ],
-      getVercelAuthStatus: vi.fn(async () => authStatuses.shift() ?? "cli-missing"),
+      }),
+    );
+  });
+
+  it("keeps the completed /add result after onboarding", async () => {
+    const renderCommandInvocation = vi.fn();
+    const renderCommandResult = vi.fn();
+    const stages: string[] = [];
+    const runner = new EveTUIRunner({
+      session: sessionYielding([]),
+      renderer: fakeRenderer({
+        readPrompt: vi.fn(async () => undefined),
+        renderCommandInvocation,
+        renderCommandResult,
+        setupFlow: createFakeSetupFlowRenderer(),
+      }),
+      name: "Weather Agent",
+      appRoot: "/tmp/weather-agent",
+      onboard: true,
+      bootDetections: [],
+      onOnboardingStep: ({ step }) => stages.push(step),
+      onOnboardingTerminal: ({ step, result }) => stages.push(`${step}_${result}`),
       promptCommandHandler: {
-        handle: async (command) => {
-          order.push(command.name);
-          return { message: "/vc:install dismissed." };
-        },
+        handle: async (command) =>
+          command.name === "model"
+            ? { message: "Model ready" }
+            : { message: "Added Web Chat", tone: "success" as const },
       },
     });
 
     await runner.run();
 
-    expect(order).toEqual(["vc:install"]);
-    expect(end).toHaveBeenCalledOnce();
+    expect(stages).toEqual(["model_provider", "registry_channels", "registry_channels_completed"]);
+    expect(renderCommandInvocation).toHaveBeenCalledWith("/add", undefined);
+    expect(renderCommandResult).toHaveBeenCalledWith("Added Web Chat", "success");
+  });
+
+  it("does not render a detached /add dismissed result when onboarding is cancelled", async () => {
+    const renderCommandResult = vi.fn();
+    const stages: string[] = [];
+    const renderer = fakeRenderer({
+      readPrompt: vi.fn(async () => undefined),
+      renderCommandResult,
+      setupFlow: createFakeSetupFlowRenderer(),
+    });
+    const runner = new EveTUIRunner({
+      session: sessionYielding([]),
+      renderer,
+      name: "Weather Agent",
+      appRoot: "/tmp/weather-agent",
+      onboard: true,
+      bootDetections: [],
+      onOnboardingStep: ({ step }) => stages.push(step),
+      onOnboardingTerminal: ({ step, result }) => stages.push(`${step}_${result}`),
+      getVercelAuthStatus: vi.fn(async () => "authenticated" as const),
+      promptCommandHandler: {
+        handle: async (command) =>
+          command.name === "model"
+            ? { message: "Model ready" }
+            : { message: "/add dismissed.", cancelled: true as const },
+      },
+    });
+
+    await runner.run();
+
+    expect(stages).toEqual(["model_provider", "registry_channels", "registry_channels_cancelled"]);
+    expect(renderCommandResult).not.toHaveBeenCalledWith("/add dismissed.", expect.anything());
   });
 
   it("does not auto-open /model outside the prefilled onboarding launch", async () => {
@@ -3365,7 +3828,6 @@ describe("EveTUIRunner boot setup detection", () => {
     });
     expect(headers.map((header) => header.info?.agent.model.endpoint)).toEqual([
       { kind: "gateway", connected: false },
-      { kind: "gateway", connected: true, credential: "api-key" },
     ]);
   });
 
@@ -3399,7 +3861,7 @@ describe("EveTUIRunner boot setup detection", () => {
 
     expect(client.info).toHaveBeenCalledTimes(2);
     expect(detect.mock.calls.at(-1)?.[0].info).toBeUndefined();
-    expect(headers.at(-1)?.info).toBeUndefined();
+    expect(headers.at(-1)?.info).toBe(disconnectedGatewayInfo);
   });
 
   it("stays quiet without a local setup context, even with issues", async () => {
@@ -3792,6 +4254,9 @@ describe("EveTUIRunner cancelled-turn subagent settling", () => {
               init?.signal?.addEventListener("abort", () => controller.close(), { once: true });
             },
           }),
+          {
+            headers: { [EVE_STREAM_VERSION_HEADER]: EVE_MESSAGE_STREAM_VERSION },
+          },
         ),
     );
 

@@ -109,6 +109,7 @@ describe("normalizeAgentDefinition", () => {
         limits: {
           maxInputTokensPerSession: 200_000,
           maxOutputTokensPerSession: 20_000,
+          maxTokenCostUsdPerSession: 1.5,
           sessionTimeoutMs: 86_400_000,
         },
       },
@@ -118,6 +119,7 @@ describe("normalizeAgentDefinition", () => {
     expect(definition.limits).toEqual({
       maxInputTokensPerSession: 200_000,
       maxOutputTokensPerSession: 20_000,
+      maxTokenCostUsdPerSession: 1.5,
       sessionTimeoutMs: 86_400_000,
     });
   });
@@ -129,6 +131,7 @@ describe("normalizeAgentDefinition", () => {
         limits: {
           maxInputTokensPerSession: false,
           maxOutputTokensPerSession: false,
+          maxTokenCostUsdPerSession: false,
           sessionTimeoutMs: false,
         },
       },
@@ -138,6 +141,7 @@ describe("normalizeAgentDefinition", () => {
     expect(definition.limits).toEqual({
       maxInputTokensPerSession: false,
       maxOutputTokensPerSession: false,
+      maxTokenCostUsdPerSession: false,
       sessionTimeoutMs: false,
     });
   });
@@ -175,6 +179,10 @@ describe("normalizeAgentDefinition", () => {
     ["maxOutputTokensPerSession", 1.5],
     ["maxOutputTokensPerSession", -1],
     ["maxOutputTokensPerSession", "20000"],
+    ["maxTokenCostUsdPerSession", 0],
+    ["maxTokenCostUsdPerSession", -0.01],
+    ["maxTokenCostUsdPerSession", Number.POSITIVE_INFINITY],
+    ["maxTokenCostUsdPerSession", "1.50"],
     ["sessionTimeoutMs", 0],
     ["sessionTimeoutMs", 1.5],
     ["sessionTimeoutMs", -1],
@@ -267,32 +275,18 @@ describe("normalizeAgentDefinition", () => {
     ).toThrow('Unknown key "subagentPersistentSessions"');
   });
 
-  it("accepts a boolean tasks flag", () => {
-    const definition = normalizeAgentDefinition(
-      {
-        model: "openai/gpt-5.5",
-        experimental: {
-          tasks: true,
-        },
-      },
-      FAILURE_MESSAGE,
-    );
-
-    expect(definition.experimental?.tasks).toBe(true);
-  });
-
-  it("rejects non-boolean tasks values", () => {
+  it.each([true, false, "yes"])("rejects the removed tasks flag", (tasks) => {
     expect(() =>
       normalizeAgentDefinition(
         {
           model: "openai/gpt-5.5",
           experimental: {
-            tasks: "yes",
+            tasks,
           },
         },
         FAILURE_MESSAGE,
       ),
-    ).toThrow('"experimental.tasks" must be a boolean.');
+    ).toThrow('Unknown key "tasks"');
   });
 });
 

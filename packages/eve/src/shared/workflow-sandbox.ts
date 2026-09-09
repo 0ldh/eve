@@ -45,7 +45,7 @@ export async function createWorkflowSandboxTool(input: {
 
 export async function requestWorkflowSandboxInterrupt(input: {
   readonly kind: string;
-  readonly runtimeAction: unknown;
+  readonly task: unknown;
   readonly toolInput: unknown;
   readonly toolName: string;
 }): Promise<unknown> {
