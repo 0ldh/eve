@@ -31,7 +31,6 @@ import {
   SessionDynamicToolRuntimeRevisionKey,
   TurnTaskDeliveryKey,
   TurnDeliveryIdsKey,
-  TurnTaskStateKey,
 } from "#context/keys.js";
 import { BundleKey, ChannelKey } from "#runtime/sessions/runtime-context-keys.js";
 import { deserializeContext, serializeContext } from "#context/serialize.js";
@@ -98,6 +97,7 @@ import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
 import { bindDynamicConnections } from "#execution/dynamic-connections.js";
 import { preserveCancelledTurnMessage } from "#execution/cancelled-turn-message.js";
 import { deferMismatchedInlineTurnStep } from "#execution/accepted-delivery-deployment.js";
+import * as activityCohort from "#execution/activity-cohort.js";
 
 const TASK_DONE_WITH_PENDING_INPUT_ERROR_MESSAGE =
   "Task mode cannot complete while input requests remain pending.";
@@ -125,7 +125,6 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
   const ctx = await deserializeContext(input.serializedContext);
   if (rawInput.input?.kind === "deliver") {
     ctx.set(TurnTaskDeliveryKey, "none");
-    ctx.delete(TurnTaskStateKey);
   }
   const adapter = ctx.require(ChannelKey);
   const bundle = ctx.require(BundleKey);
@@ -151,7 +150,6 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     // Outside a workflow context (e.g. tests) — getHookUrl will return undefined.
   }
 
-  // Resolve authorization callbacks before the adapter sees the delivery.
   const pendingAuth = getPendingAuthorization(durableSession.state);
   let completedAuths: ReturnType<typeof matchAuthorizationCallbacks>["matches"] | undefined;
   if (pendingAuth && input.input?.kind === "deliver") {
@@ -161,14 +159,16 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     );
     input = { ...input, input: { ...input.input, payloads: remainingPayloads } };
     if (matches.length > 0) {
+      const matchedAttemptIds = activityCohort.restoreAuthorizationActivity({
+        ctx,
+        matches,
+        pending: pendingAuth,
+      });
       const authResults = matches.map((match) => match.result);
       ctx.set(PendingAuthorizationResultKey, authResults);
       durableSession = {
         ...durableSession,
-        state: clearPendingAuthorization(
-          durableSession.state,
-          authResults.map((result) => result.attemptId ?? result.name),
-        ),
+        state: clearPendingAuthorization(durableSession.state, matchedAttemptIds),
       };
       completedAuths = matches;
       if (remainingPayloads.length === 0) {
@@ -266,6 +266,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     resolved = { runtimeActionResults: input.input.results };
   }
 
+  let taskRootTurnId: string | undefined;
   if (
     resolved !== undefined &&
     rawInput.input?.kind === "deliver" &&
@@ -277,6 +278,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     });
     if (taskContext !== undefined) {
       ctx.set(TurnTaskDeliveryKey, taskContext.phase);
+      taskRootTurnId = taskContext.rootTurnId;
       resolved = {
         ...resolved,
         context: [...(resolved.context ?? []), taskContext.context],
@@ -284,24 +286,30 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     }
   }
 
-  if (ctx.get(TurnTaskDeliveryKey) === "none") {
+  activityCohort.updateActivityRootForDelivery({
+    activeTurnId: activeTurnId(initialEmissionState),
+    ctx,
+    delivery: rawInput.input?.kind === "deliver" ? rawInput.input : undefined,
+    sessionState: durableSession.state,
+    taskRootTurnId,
+  });
+
+  const taskDeliveryPhase = ctx.get(TurnTaskDeliveryKey);
+  if (taskDeliveryPhase === "none" || taskDeliveryPhase === "initiating") {
     const taskContext = resolveInitiatingTaskContext({
       state: durableSession.state,
       turnId: activeTurnId(initialEmissionState),
     });
     if (taskContext !== undefined) {
       ctx.set(TurnTaskDeliveryKey, taskContext.phase);
-      ctx.set(TurnTaskStateKey, taskContext.context);
     }
   }
 
-  // Persist adapter-state mutations across the step boundary.
   if (input.input?.kind === "deliver") {
     const updatedAdapter = { ...adapter, state: { ...adapterCtx.state } };
     setChannelContext(ctx, updatedAdapter);
   }
 
-  // Adapter handled the delivery inline; re-park and skip unchanged snapshot writes.
   if (input.input?.kind === "deliver" && resolved === undefined) {
     await contextStorage.run(ctx, () =>
       instrumentation?.instrumentChannelDelivery({
@@ -382,7 +390,6 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
 
   const writer = input.parentWritable.getWriter();
 
-  // Persisted chunks and hooks must agree on the stamped id.
   const emit = async (event: UnstampedMessageStreamEvent): Promise<MessageStreamEvent> => {
     const toEmit = await callAdapterEventHandler(adapter, event, adapterCtx);
     setChannelContext(ctx, { ...adapter, state: { ...adapterCtx.state } });
@@ -391,6 +398,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     return stamped;
   };
   const handleEvent: HandleEventFn = async (event, messages): Promise<void> => {
+    activityCohort.updateActivityBlockers(ctx, event);
     // A remote task's parent owns its HITL. Forward blocking events over
     // the task callback and keep them out of the child's local channel;
     // otherwise two TUIs can present and answer the same request.
