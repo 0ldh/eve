@@ -33,6 +33,7 @@ export interface BackgroundToolCallBatch {
 }
 
 export interface BackgroundToolExecutor {
+  hasPendingTasks?(): boolean;
   readAgentViews?(): Promise<readonly AgentView[]>;
   execute(input: {
     readonly batch: BackgroundToolCallBatch;
