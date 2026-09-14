@@ -17,9 +17,9 @@ import {
   type BackgroundToolExecutor,
 } from "#harness/background-tools.js";
 import { deriveBackgroundTaskActivityObserver } from "#execution/activity-work.js";
-import type { ActivityWorkIdentityV1 } from "#protocol/activity.js";
 import { isAsyncIterable } from "#shared/async-iterable.js";
 import { parseJsonValue } from "#shared/json.js";
+import { projectToolStartLabel } from "#harness/action-presentation.js";
 import type { ToolExecuteOptions } from "#tools/definition.js";
 import { createTaskMessage, isTaskMessage, type TaskExec } from "#tools/task.js";
 import { findSessionTaskEntry, recordSessionTask } from "#tasks/session-index.js";
@@ -55,11 +55,6 @@ import { cancelBackgroundAgentTask } from "#execution/tools/subagent/task-cancel
 
 const IN_PROCESS_WORKFLOW_EXECUTOR = { data: {}, kind: "workflow-task" } as const;
 
-type ActivityBackgroundTask = BackgroundTask & {
-  readonly activityWorkIdentity?: ActivityWorkIdentityV1;
-};
-type ActivityBackgroundTaskDraft = Omit<ActivityBackgroundTask, "taskRunId">;
-
 interface BackgroundToolExecutionRecord {
   readonly callId: string;
   claim?: {
@@ -71,7 +66,7 @@ interface BackgroundToolExecutionRecord {
     readonly operationId: string;
   };
   settled: boolean;
-  task?: ActivityBackgroundTask;
+  task?: BackgroundTask;
 }
 
 interface BackgroundToolStepResult {
@@ -335,7 +330,7 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     readonly record: BackgroundToolExecutionRecord;
   }): Promise<{
     readonly receipt?: { readonly agentId: string };
-    readonly task: ActivityBackgroundTask;
+    readonly task: BackgroundTask;
   }> {
     const workflow =
       input.input.definition.workflowId === undefined
@@ -386,10 +381,12 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       kind: "tool" as const,
       name: input.input.definition.name,
     };
+    const activityLabel = projectToolStartLabel(input.input.definition, input.input.toolInput);
     const taskInput = {
       activityObserver: deriveBackgroundTaskActivityObserver({
         activityObserver: input.ctx.get(ActivityObserverKey),
         callId: input.input.options.toolCallId,
+        label: activityLabel,
         name: metadata.name,
         parentSessionId: this.initialSession.sessionId,
         parentTurnId,
@@ -419,7 +416,7 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       throw new Error(`Background workflow tool "${input.input.definition.name}" has no input.`);
     }
 
-    const task: ActivityBackgroundTaskDraft = {
+    const task: Omit<BackgroundTask, "taskRunId"> = {
       ...prepareBackgroundTask(taskInput),
       activityWorkIdentity:
         workflow.resultKind === "subagent" ? taskInput.activityObserver?.workIdentity : undefined,
