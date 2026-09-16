@@ -88,6 +88,8 @@ The Web Chat installer does not support agent workspaces. Create the frontend us
 
 Workspace agents use `/<name>/eve/v1/*` routes. A same-origin React client calls support with `useEveAgent({ host: "/support" })`; the hook's `agent: "support"` shorthand targets the different `/eve/agents/support` mount used by frontend framework integrations.
 
+Run Vercel CLI 59.16.0 or newer with `vercel dev --local` to start the complete service graph locally. Each hostless agent is available at `http://localhost:3000/<agent>/`, and default `defineWorkspaceAgent` transports can call peers without deployment credentials. Run `eve dev` instead when you only need one agent and the eve terminal UI.
+
 Generated transport routes are inserted before a filesystem handler or, when no filesystem handler exists, before authored routes. `withEve` throws instead of overwriting an authored service key or exact transport route that belongs to a generated agent. Remove the authored route, and remove or rename the authored service; `withEve` adds both automatically. Names in the array form of `services` must also be unique. Other service names, routes, bindings, and Cron Jobs remain authored in `vercel.ts`.
 
 Custom agent channel endpoints are not published automatically. Expose one explicitly by routing it to the generated service:
