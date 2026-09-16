@@ -2083,7 +2083,8 @@ describe("TerminalRenderer (inline scrollback)", () => {
     const { screen, input, renderer } = makeRenderer();
     let streamController: ReadableStreamDefaultController<AgentTUIStreamEvent> | undefined;
     const cancel = vi.fn();
-    const steer = vi.fn(async () => {});
+    const accepted = Promise.withResolvers<void>();
+    const steer = vi.fn(() => accepted.promise);
     const rendering = renderer.renderStream(
       {
         cancel,
@@ -2109,6 +2110,7 @@ describe("TerminalRenderer (inline scrollback)", () => {
     expect(steer).toHaveBeenNthCalledWith(2, "go south");
     expect(screen.snapshot()).not.toContain("Queue");
 
+    accepted.resolve();
     streamController?.enqueue({ type: "finish" });
     streamController?.close();
     await rendering;

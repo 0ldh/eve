@@ -45,7 +45,7 @@ run({ app: "agent-tui-client", kind: "local-build" }, async (target) => {
 
   await screen.waitForIdlePrompt(5_000);
 
-  // A long first turn holds the stream open while messages queue behind it.
+  // A long first turn holds the stream open while Enter submits steering.
   input.type("Write a short story of about 150 words about tides. Do not use any tools.");
   input.enter();
   await screen.waitForText("Working for", 30_000);
