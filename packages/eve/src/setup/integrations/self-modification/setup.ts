@@ -12,13 +12,25 @@ import {
 } from "#self-modification/setup.js";
 import { SELF_MODIFICATION_CONFIG_PATH } from "#self-modification/git-workspace.js";
 import type { VercelProjectReference } from "#setup/project-resolution.js";
+import { ensureConnectionDependencies } from "#setup/scaffold/index.js";
 
 import { describeIntegrationSetupEnvironment } from "../shared/environment.js";
+import { installScaffoldDependencies } from "../shared/scaffold.js";
 import {
   defineSetupIntegration,
   type SetupApplyContext,
   type SetupPrepareContext,
 } from "../types.js";
+
+export interface SelfModificationApplyDependencies {
+  ensureConnectionDependencies: typeof ensureConnectionDependencies;
+  installScaffoldDependencies: typeof installScaffoldDependencies;
+}
+
+const defaultApplyDependencies: SelfModificationApplyDependencies = {
+  ensureConnectionDependencies,
+  installScaffoldDependencies,
+};
 
 type SelfModificationSetupPlan =
   | { readonly kind: "authored" }
@@ -153,6 +165,7 @@ export async function applySelfModificationSetup(
     undefined,
     context.projectRoot,
   ),
+  deps: SelfModificationApplyDependencies = defaultApplyDependencies,
 ) {
   if (plan.kind === "authored") {
     return {
@@ -165,6 +178,15 @@ export async function applySelfModificationSetup(
 
   const connector = await operations.findOrCreateConnector(plan.connectorName, plan.project);
   await operations.attachConnector(connector, plan.project);
+  const packageJsonUpdated = await deps.ensureConnectionDependencies({
+    projectRoot: context.appRoot,
+  });
+  await deps.installScaffoldDependencies({
+    changed: packageJsonUpdated.length > 0,
+    log: context.presenter.log,
+    projectPath: context.appRoot,
+    signal: context.signal,
+  });
   await operations.writeConfig(renderSelfModificationConfig({ ...plan.values, connector }));
   context.presenter.log.success(`Updated ${SELF_MODIFICATION_CONFIG_PATH}.`);
   context.presenter.nextSteps([
