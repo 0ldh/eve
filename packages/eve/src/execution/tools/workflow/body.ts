@@ -2,7 +2,7 @@ import { getWorkflowMetadata } from "#compiled/@workflow/core/index.js";
 
 import type { SessionContext } from "#context/session-context.js";
 import { agent } from "#execution/tools/subagent/invoke-agent.js";
-import type { WorkflowToolContext } from "#tools/workflow-definition.js";
+import type { AgentInput, WorkflowToolContext } from "#tools/workflow-definition.js";
 import { ask, attachWorkflowToolRunContext } from "#execution/tools/workflow/ask.js";
 import {
   type WorkflowToolRunOutcome,
@@ -18,8 +18,6 @@ import type { ToolContext } from "#tools/definition.js";
 import { createTaskMessage, type TaskExec } from "#tools/task.js";
 
 export interface WorkflowBodyDefinition {
-  /** Advertised by the parent driver; absent on runs started before this capability. */
-  readonly authorizationSupported?: boolean;
   readonly callId: string;
   readonly executeInput?: JsonValue;
   readonly input: JsonObject;
@@ -59,7 +57,6 @@ export async function executeWorkflowBody(
   attachWorkflowToolRunContext(ctx, {
     from,
     owner: input.owner,
-    authorizationSupported: input.execution === "blocking" || input.authorizationSupported === true,
   });
   let reportCount = 0;
 
@@ -141,7 +138,8 @@ function createWorkflowBodyContext(
     );
   };
   const ctx: ToolContext & WorkflowToolContext = {
-    agent: (input) => agent(ctx, input),
+    agent: ((target: string, agentInput: AgentInput) =>
+      agent(ctx, target, agentInput)) as WorkflowToolContext["agent"],
     ask: (request) => ask(ctx, request),
     abortSignal: signal,
     callId: input.callId,
